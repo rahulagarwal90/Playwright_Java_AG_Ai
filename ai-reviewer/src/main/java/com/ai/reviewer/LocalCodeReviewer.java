@@ -65,23 +65,23 @@ public class LocalCodeReviewer {
                         .filter(finding -> "FAILED".equalsIgnoreCase(finding.status))
                         .toList();
                 if (!failedFindings.isEmpty()) {
-                    System.err.println("[ERROR] AI Code Quality Gate detected failures.");
+                    LOGGER.severe("[ERROR] AI Code Quality Gate detected failures.");
                     // isGitHubContext() already requires GITHUB_PR_NUMBER or CHANGE_ID (plus
                     // GITHUB_REPOSITORY/GITHUB_TOKEN), so it is false for any local terminal run
                     // that lacks real PR context, exactly as Jenkins provides it.
                     if (reviewer.isGitHubContext()) {
-                        System.err.println("[INFO] Posting line-level PR review comments to GitHub.");
+                        LOGGER.info("[INFO] Posting line-level PR review comments to GitHub.");
                         reviewer.postGitHubReviewComments(failedFindings);
                     } else {
-                        System.out.println("[INFO] No PR context detected — findings printed to terminal only, GitHub posting skipped.");
+                        LOGGER.info("[INFO] No PR context detected — findings printed to terminal only, GitHub posting skipped.");
                     }
                     exitCode = 1;
                 } else {
-                    System.out.println("[INFO] AI Code Quality Gate passed. No failed categories detected.");
+                    LOGGER.info("[INFO] AI Code Quality Gate passed. No failed categories detected.");
                 }
             }
         } catch (Exception e) {
-            System.err.println("[ERROR] Exception during execution: " + e.getMessage());
+            LOGGER.severe("[ERROR] Exception during execution: " + e.getMessage());
             exitCode = 1;
         }
         System.exit(exitCode);
@@ -93,18 +93,18 @@ public class LocalCodeReviewer {
      */
     public CompletableFuture<String> runReview() {
         try {
-            System.out.println(">>> Isolating local changes via 'git diff HEAD'...");
+            LOGGER.info(">>> Isolating local changes via 'git diff HEAD'...");
             String diffText = getGitDiff();
             String filteredDiff = filterDiff(diffText);
             if (filteredDiff.trim().isEmpty()) {
-                System.out.println("[INFO] No git changes detected.");
-                System.out.println(">>> Tip: Edit or stage files in git before running the code reviewer.");
+                LOGGER.info("[INFO] No git changes detected.");
+                LOGGER.info(">>> Tip: Edit or stage files in git before running the code reviewer.");
                 return CompletableFuture.completedFuture("No changes");
             }
-            System.out.println(">>> Sending changes to local Ollama (model: qwen2.5-coder:14b)...");
+            LOGGER.info(">>> Sending changes to local Ollama (model: qwen2.5-coder:14b)...");
             return sendToOllama(filteredDiff);
         } catch (Exception e) {
-            System.err.println("[ERROR] Failed to execute git diff: " + e.getMessage());
+            LOGGER.severe("[ERROR] Failed to execute git diff: " + e.getMessage());
             CompletableFuture<String> future = new CompletableFuture<>();
             future.completeExceptionally(e);
             return future;
@@ -714,7 +714,6 @@ public class LocalCodeReviewer {
      */
     private void runLearn() throws Exception {
         if (!isGitHubContext()) {
-            System.err.println("[WARN] GitHub review context is not configured; learn mode requires PR context.");
             return;
         }
 
@@ -774,7 +773,7 @@ public class LocalCodeReviewer {
                         : "";
                 if (botUsername != null && !botUsername.isBlank() && botUsername.equals(authorLogin)) {
                     botSkippedCount++;
-                    System.out.println("[LEARN] Skipped comment from bot account: " + authorLogin);
+                    LOGGER.info("[LEARN] Skipped comment from bot account: " + authorLogin);
                     continue;
                 }
 
@@ -793,12 +792,12 @@ public class LocalCodeReviewer {
                     rule = extractRuleFromComment(body);
                 } catch (Exception ex) {
                     failedExtractionCount++;
-                    System.out.println("[LEARN] Comment: " + body);
-                    System.out.println("[LEARN] Skipped — rule extraction failed: " + ex.getMessage());
+                    LOGGER.info("[LEARN] Comment: " + body);
+                    LOGGER.info("[LEARN] Skipped — rule extraction failed: " + ex.getMessage());
                     continue;
                 }
-                System.out.println("[LEARN] Comment: " + body);
-                System.out.println("[LEARN] Extracted rule: " + rule);
+                LOGGER.info("[LEARN] Comment: " + body);
+                LOGGER.info("[LEARN] Extracted rule: " + rule);
                 learnedCount++;
 
                 RuleStore.LearnedRule learnedRule = new RuleStore.LearnedRule();
@@ -809,7 +808,7 @@ public class LocalCodeReviewer {
             }
         }
 
-        System.out.println("[LEARN] Processed " + matchedCommentCount + " @ai-learn comment(s): "
+        LOGGER.info("[LEARN] Processed " + matchedCommentCount + " @ai-learn comment(s): "
                 + learnedCount + " learned, " + (botSkippedCount + failedExtractionCount) + " skipped.");
 
         // STEP 3: persist every rule — previously-learned ones plus whatever was just extracted
@@ -927,9 +926,9 @@ public class LocalCodeReviewer {
                    [Category Name]: STATUS: [FAILED]
                    File: [Provide the file path]
                    Line: [Provide the line number if visible]
-                   Problem: [Clear explanation of why the code violates automation best practices]
+                   Problem: [Clear explanation of why the code violates automation best practices, in 1-2 sentences]
                    AI Suggested Fix:
-                   [Provide the exact, syntactically correct Java code snippet that replaces the bad code completely using active variables like testContext.getPage(). Do not use markdown backticks or asterisks.]
+                   [Provide the exact, syntactically correct Java code snippet that replaces the bad code completely using active variables like testContext.getPage(). Do not use markdown backticks or asterisks. Limit any explanation to 1-2 sentences.]
                 """;
 
         // STEP 4 (read side of the learning loop): every review run — including ones on a
@@ -1012,15 +1011,15 @@ public class LocalCodeReviewer {
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .handle((response, throwable) -> {
                     if (throwable != null) {
-                        System.err.println("\n[ERROR] Failed to connect to local Ollama service.");
-                        System.err.println(
+                        LOGGER.severe("\n[ERROR] Failed to connect to local Ollama service.");
+                        LOGGER.info(
                                 "[HELP] Please ensure Ollama is installed and running via: ollama run qwen2.5-coder:14b");
-                        System.err.println("[HELP] Ensure the Ollama port is accessible at: http://localhost:11434");
+                        LOGGER.info("[HELP] Ensure the Ollama port is accessible at: http://localhost:11434");
                         throw new RuntimeException("Ollama connection failed", throwable);
                     }
                     if (response.statusCode() != 200) {
-                        System.err.println("\n[ERROR] Ollama returned non-200 status code: " + response.statusCode());
-                        System.err.println("Response body: " + response.body());
+                        LOGGER.severe("\n[ERROR] Ollama returned non-200 status code: " + response.statusCode());
+                        LOGGER.severe("Response body: " + response.body());
                         throw new RuntimeException("Ollama non-200 status code: " + response.statusCode());
                     }
                     JsonObject jsonResponse = gson.fromJson(response.body(), JsonObject.class);
@@ -1032,11 +1031,11 @@ public class LocalCodeReviewer {
                                 .get(0).getAsJsonObject()
                                 .getAsJsonObject("message").get("content").getAsString();
                     }
-                    System.out.println("\n==================================================");
-                    System.out.println("                AI CODE REVIEW FEEDBACK           ");
-                    System.out.println("==================================================");
-                    System.out.println(feedback);
-                    System.out.println("==================================================");
+                    LOGGER.info("\n==================================================");
+                    LOGGER.info("                AI CODE REVIEW FEEDBACK           ");
+                    LOGGER.info("==================================================");
+                    LOGGER.info(feedback);
+                    LOGGER.info("==================================================");
                     return feedback;
                 });
     }
