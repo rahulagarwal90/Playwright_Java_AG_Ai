@@ -4,6 +4,8 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -66,9 +68,7 @@ public class LocalCodeReviewer {
                         .toList();
                 if (!failedFindings.isEmpty()) {
                     LOGGER.severe("[ERROR] AI Code Quality Gate detected failures.");
-                    // isGitHubContext() already requires GITHUB_PR_NUMBER or CHANGE_ID (plus
-                    // GITHUB_REPOSITORY/GITHUB_TOKEN), so it is false for any local terminal run
-                    // that lacks real PR context, exactly as Jenkins provides it.
+                    // False unless GITHUB_REPOSITORY, a PR number, and GITHUB_TOKEN are all set.
                     if (reviewer.isGitHubContext()) {
                         LOGGER.info("[INFO] Posting line-level PR review comments to GitHub.");
                         reviewer.postGitHubReviewComments(failedFindings);
@@ -235,22 +235,8 @@ public class LocalCodeReviewer {
 
     /**
      * Resolves the commit SHA used to anchor GitHub inline PR comments.
-     *
-     * Preference order:
-     * 1. The PR's actual head SHA, fetched fresh from the GitHub API (repos/{repo}/pulls/{n}
-     *    -> head.sha). This is authoritative and independent of how the CI job checked the
-     *    branch out.
-     * 2. GIT_COMMIT, set by the Jenkins git plugin to whatever commit is actually checked out.
-     * 3. `git rev-parse HEAD` against the local working tree, for local/non-CI runs.
-     *
-     * MERGE-BEFORE-BUILD RISK: this method is only ever called from a GitHub PR context (see
-     * postGitHubReviewComments), so (1) is expected to succeed in practice and (2)/(3) exist as
-     * a defensive fallback. That fallback still carries risk: Jenkins multibranch pipelines
-     * configured to "merge before build" check out a synthetic merge commit of the PR branch
-     * into the target branch rather than the PR's real head commit. If GIT_COMMIT or a local
-     * `git rev-parse HEAD` were used in that setup, the resulting SHA would not be one of the
-     * PR's actual commits, and GitHub's create-review-comment API would reject it with a 422 —
-     * a failure mode that cannot reproduce when testing locally against a normal checkout.
+     * Prefers the PR's real head SHA from the GitHub API; falls back to GIT_COMMIT or local
+     * `git rev-parse HEAD` only if that fails (risky under Jenkins "merge before build" checkouts).
      */
     private String getGitCommitSha() throws Exception {
         try {
@@ -278,9 +264,7 @@ public class LocalCodeReviewer {
     }
 
     /**
-     * Fetches the PR's real head commit SHA directly from the GitHub API. Unlike GIT_COMMIT or
-     * a local `git rev-parse HEAD`, this is unaffected by whatever merge/checkout strategy the
-     * CI job used, since it reads GitHub's own record of the PR branch's tip commit.
+     * Fetches the PR's real head commit SHA from the GitHub API, independent of local checkout state.
      */
     private String getGitHubPullRequestHeadSha() throws Exception {
         String repo = getGitHubRepository();
@@ -325,8 +309,7 @@ public class LocalCodeReviewer {
             boolean hasChanges = false;
             String[] lines = block.split("\n");
             for (String line : lines) {
-                // Check for lines starting with + or - that are not part of diff file headers
-                // (+++ or ---)
+                // Skip diff file headers (+++ / ---); only real +/- content lines count.
                 if ((line.startsWith("+") && !line.startsWith("+++")) ||
                         (line.startsWith("-") && !line.startsWith("---"))) {
                     hasChanges = true;
@@ -388,18 +371,11 @@ public class LocalCodeReviewer {
     }
 
     /**
-     * Parses the AI review feedback text into structured ReviewFinding objects.
-     * 
-     * This parser handles variable AI output formats:
-     * - Categories with or without **bold** or [brackets]
-     * - STATUS field that may appear inline (STATUS: FAILED) or on separate lines
-     * - Multi-line fields (Problem, AI Suggested Fix can span multiple lines)
-     * - File paths, line numbers, problem descriptions, and fixes
-     * 
-     * CRITICAL: GitHub PR inline comments require STATUS: FAILED to be detected so the
-     * reviewer can post comments. This parser splits blocks by blank lines and extracts
-     * each field robustly using regex patterns that work with different AI output layouts.
-     * 
+     * Parses AI review feedback text into structured ReviewFinding objects. Tolerant of
+     * formatting variance in model output (bold/bracket decorations, inline or standalone
+     * STATUS, multi-line Problem/Fix fields) since STATUS: FAILED must be reliably detected
+     * to post GitHub comments.
+     *
      * @param reviewText The raw feedback text from Ollama AI model
      * @return List of ReviewFinding objects with category, status, file, line, problem, and fix
      */
@@ -419,8 +395,7 @@ public class LocalCodeReviewer {
                 continue;
             }
 
-            // Extract category name from first line, removing decorations like **Category**:
-            // This handles formats like "**Playwright Web Assertions:**" or "[Category]:"
+            // Strip decorations like **bold** or [brackets] from the category name.
             String[] lines = trimmed.split("\\n");
             String categoryLine = lines[0].trim();
 
@@ -439,16 +414,13 @@ public class LocalCodeReviewer {
                     .replaceAll(":$", "")
                     .trim();
 
-            // Extract STATUS field which may be inline (STATUS: FAILED) or on its own line
-            // This is critical for detecting failed checks so GitHub comments can be posted
+            // STATUS may be inline or on its own line; fall back to a dedicated field lookup.
             if ("PASSED".equals(status)) {
                 status = extractSingleLineField(trimmed, "STATUS")
                         .map(value -> value.replaceAll("\\[|\\]", "").trim().toUpperCase())
                         .orElse("PASSED");
             }
 
-            // Extract file path, line number, problem description, and suggested fix
-            // Using field extraction methods that handle multi-line content
             String file = extractSingleLineField(trimmed, "File").orElse("");
             String lineValue = extractSingleLineField(trimmed, "Line")
                     .or(() -> extractSingleLineField(trimmed, "Lines"))
@@ -645,21 +617,7 @@ public class LocalCodeReviewer {
 
     /**
      * Posts a single AI review finding as an inline comment on a GitHub PR.
-     * 
-     * GitHub PR comment API requires:
-     * - commit_id: the commit SHA where the comment should appear
-     * - path: the file path relative to repo root
-     * - line: the line number in the file (on the RIGHT/new side of the diff)
-     * - body: the comment text
-     * 
-     * Uses java.util.logging for debug output so it doesn't interfere with production logs.
-     * 
-     * @param repo Repository in format "owner/repo"
-     * @param prNumber The PR number
-     * @param apiBase GitHub API base URL (usually https://api.github.com)
-     * @param commitSha The commit SHA for this PR
-     * @param finding The ReviewFinding containing file, line, problem, and fix
-     * @throws Exception If GitHub API returns a non-2xx status code
+     * "side": "RIGHT" anchors the comment to the new (added) side of the diff.
      */
     private void createGitHubPullRequestComment(String repo,
                                                 String prNumber,
@@ -673,8 +631,7 @@ public class LocalCodeReviewer {
         payload.addProperty("side", "RIGHT");
         payload.addProperty("commit_id", commitSha);
         String jsonBody = new Gson().toJson(payload);
-        
-        // Log debug info before posting (useful for troubleshooting missing GitHub comments)
+
         LOGGER.fine(() -> "Posting PR comment to: " + repo + " PR:" + prNumber + " file:" + finding.file + " line:" + finding.line);
         
         HttpRequest request = HttpRequest.newBuilder()
@@ -686,8 +643,7 @@ public class LocalCodeReviewer {
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-        
-        // Log GitHub API response for debugging (status code and response body help identify why comments failed)
+
         LOGGER.fine(() -> "GitHub response: " + response.statusCode() + " body: " + response.body());
         
         if (response.statusCode() < 200 || response.statusCode() > 299) {
@@ -696,9 +652,8 @@ public class LocalCodeReviewer {
     }
 
     /**
-     * Builds the exact text posted as a GitHub inline PR comment for one FAILED finding —
-     * the category, the problem explanation, and the suggested fix — in the fixed format
-     * GitHub renders back to reviewers directly on the PR diff.
+     * Builds the exact text posted as a GitHub inline PR comment for one FAILED finding — the
+     * category, problem, and suggested fix, in the fixed format GitHub renders on the PR diff.
      */
     private String buildCommentBody(ReviewFinding finding) {
         return String.format("[AI CODE QUALITY GATE] %s FAILURE\nProblem: %s\nSuggested fix:\n%s",
@@ -708,9 +663,7 @@ public class LocalCodeReviewer {
     }
 
     /**
-     * "learn" mode: fetches existing PR review comments, keeps only the ones a human
-     * tagged with "@ai-learn", converts each into a single imperative rule via the model,
-     * and persists the results to the RuleStore so future review runs can apply them.
+     * "learn" mode: converts human @ai-learn PR comments into standing rules persisted via RuleStore.
      */
     private void runLearn() throws Exception {
         if (!isGitHubContext()) {
@@ -723,10 +676,7 @@ public class LocalCodeReviewer {
         String token = getGitHubToken();
         String botUsername = System.getenv("GITHUB_BOT_USERNAME");
 
-        // STEP 1 of the learning loop: pull down every comment that exists on this PR — not
-        // just @ai-learn ones. GitHub's REST API has no server-side way to filter comments by
-        // body text, so everything on the PR is fetched here first; the actual @ai-learn
-        // filtering happens below, once the raw comment list is in hand.
+        // GitHub has no server-side filter for comment body text, so fetch everything and filter below.
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(String.format("%s/repos/%s/pulls/%s/comments", apiBase, repo, prNumber)))
                 .header("Accept", "application/vnd.github.v3+json")
@@ -754,20 +704,13 @@ public class LocalCodeReviewer {
                 JsonObject comment = comments.get(i).getAsJsonObject();
                 String body = comment.has("body") ? comment.get("body").getAsString() : "";
 
-                // FILTER 1 — opt-in signal: a comment only becomes a candidate rule if a human
-                // deliberately prefixed it with "@ai-learn". This is what stops every ordinary PR
-                // comment ("nice catch", "lgtm", unrelated discussion) from being turned into an
-                // enforced rule — only feedback someone explicitly flagged as a lesson is learned.
+                // Only comments explicitly prefixed with @ai-learn become candidate rules.
                 if (body == null || !body.startsWith("@ai-learn")) {
                     continue;
                 }
                 matchedCommentCount++;
 
-                // FILTER 2 — self-learning guard: never learn from a comment authored by our own
-                // bot account. If the reviewer ingested its own prior review output as though it
-                // were human feedback, it would reinforce whatever mistakes produced that output
-                // in the first place, so any comment whose author matches GITHUB_BOT_USERNAME is
-                // discarded here before it ever reaches the model.
+                // Never learn from the bot's own comments — would reinforce whatever mistakes produced them.
                 String authorLogin = (comment.has("user") && comment.get("user").isJsonObject())
                         ? comment.getAsJsonObject("user").get("login").getAsString()
                         : "";
@@ -777,16 +720,8 @@ public class LocalCodeReviewer {
                     continue;
                 }
 
-                // STEP 2: compress the surviving human comment down to a single imperative rule
-                // using a separate, minimal model call (see extractRuleFromComment below) — this
-                // is deliberately a different call, with a different prompt, than the one used to
-                // review code in sendToOllama().
-                //
-                // This call is intentionally isolated in its own try/catch: it fails for reasons
-                // unrelated to the other comments in this PR (e.g. a transient Ollama hiccup on
-                // this one request), so one failure here must not discard every rule already
-                // extracted earlier in the same loop. Failures are logged and the comment is
-                // skipped; the loop — and the eventual ruleStore.save() below — continue.
+                // Isolated per-comment: one failed extraction (e.g. a transient Ollama error)
+                // must not discard rules already extracted from earlier comments in this loop.
                 String rule;
                 try {
                     rule = extractRuleFromComment(body);
@@ -811,12 +746,7 @@ public class LocalCodeReviewer {
         LOGGER.info("[LEARN] Processed " + matchedCommentCount + " @ai-learn comment(s): "
                 + learnedCount + " learned, " + (botSkippedCount + failedExtractionCount) + " skipped.");
 
-        // STEP 3: persist every rule — previously-learned ones plus whatever was just extracted
-        // above — to ai-reviewer/learned-rules.json. This file is meant to be committed to git,
-        // not treated as a local-only cache: Jenkins runs the reviewer against a fresh checkout
-        // of the branch on every build, so a rule only reaches Jenkins, and therefore only
-        // affects future reviews, once this file has been committed and merged. A machine-local
-        // cache would be invisible to CI and would silently stop applying rules there.
+        // Committed to git — Jenkins only sees a learned rule once this file is committed and merged.
         ruleStore.save(rules);
     }
 
@@ -827,10 +757,7 @@ public class LocalCodeReviewer {
     private String extractRuleFromComment(String commentBody) throws Exception {
         Gson gson = new Gson();
 
-        // This system prompt is intentionally tiny and has nothing to do with the code-review
-        // system prompt built in sendToOllama(). The model sees only the human's comment and the
-        // instruction "turn this into one rule" — no diff, no review categories — so its only
-        // job here is compression, not judgment about code quality.
+        // Separate, minimal prompt — compression only, not code-quality judgment.
         JsonObject systemMessage = new JsonObject();
         systemMessage.addProperty("role", "system");
         systemMessage.addProperty("content", "Convert this code review comment into one imperative rule, one line only, output nothing else.");
@@ -843,10 +770,7 @@ public class LocalCodeReviewer {
         messages.add(systemMessage);
         messages.add(userMessage);
 
-        // Temperature 0 so the same human comment reliably extracts to the same rule text.
-        // Note this isn't what makes re-running learn mode duplicate-safe — RuleStore
-        // de-duplicates by the original comment text, not by this extracted rule — but it keeps
-        // the learned rule set stable and predictable rather than drifting between runs.
+        // Temperature 0 for reproducible extraction; de-duplication itself happens in RuleStore.
         JsonObject options = new JsonObject();
         options.addProperty("temperature", 0.0);
 
@@ -880,10 +804,8 @@ public class LocalCodeReviewer {
     }
 
     /**
-     * Represents a single AI code review finding with category, status, file, line, problem, and suggested fix.
-     * 
-     * Package-visible (not private) to allow unit testing of the parser. Each finding becomes a GitHub PR inline comment
-     * if status is FAILED.
+     * A single AI review finding (category/status/file/line/problem/fix). Package-visible so the
+     * parser can be unit tested; each FAILED finding becomes a GitHub PR inline comment.
      */
     static class ReviewFinding {
         String category;
@@ -895,74 +817,40 @@ public class LocalCodeReviewer {
     }
 
     /**
-     * Sends the prepared diff text to the local Ollama HTTP API and returns the model response.
-     * The model is expected to return a review string that is printed to stdout.
+     * Loads the code-review system prompt template from the classpath resource written
+     * alongside this class (ai-reviewer/src/main/resources/system-prompt.md).
+     */
+    private static String loadSystemPromptTemplate() {
+        try (InputStream in = LocalCodeReviewer.class.getResourceAsStream("/system-prompt.md")) {
+            if (in == null) {
+                throw new IllegalStateException("Missing classpath resource: /system-prompt.md");
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to load system prompt template", e);
+        }
+    }
+
+    /**
+     * Sends the prepared diff text to the local Ollama HTTP API and returns the model's review text.
      */
     public CompletableFuture<String> sendToOllama(String diffText) {
         String annotatedDiff = annotateDiffWithLineNumbers(diffText);
 
-        // String Hygiene Rule: Strictly apply string sanitization on the raw diff text
-        // before payload assembly
+        // Escape raw diff text for safe embedding in the JSON payload.
         String sanitizedDiff = annotatedDiff
                 .replace("\\", "\\\\")
                 .replace("\"", "\\\"")
                 .replace("\n", "\\n")
                 .replace("\r", "\\r");
 
-        String systemPrompt = """
-                You are an exceptionally strict automated Code Reviewer specializing in Java Playwright test frameworks.
-                Review the provided plain text modifications line-by-line.
+        String systemPrompt = loadSystemPromptTemplate();
 
-                CRITICAL SORTING RULES:
-                - Assess each code change independently. Place a defect strictly in its single most relevant category. Do not repeat issues.
-                - Playwright Web Assertions: Only flag legacy assertions (e.g., plain java assert, JUnit, or TestNG assertions).
-                - Locator Robustness: Only flag brittle locators (e.g., absolute XPaths, long dynamic CSS).
-                - Hardcoded Configurations: Only flag hardcoded synchronizations (e.g., Thread.sleep).
-                - Logging: Only flag plain standard output statements (e.g., System.out.println, printStackTrace).
-
-                UNIVERSAL OUTPUT FORMAT:
-                - If a category passes, print exactly: [Category Name]: STATUS: [PASSED]
-                - If a category fails, print exactly:
-                   [Category Name]: STATUS: [FAILED]
-                   File: [Provide the file path]
-                   Line: [Provide the line number if visible]
-                   Problem: [Clear explanation of why the code violates automation best practices, in 1-2 sentences]
-                   AI Suggested Fix:
-                   [Provide the exact, syntactically correct Java code snippet that replaces the bad code completely using active variables like testContext.getPage(). Do not use markdown backticks or asterisks. Limit any explanation to 1-2 sentences.]
-                """;
-
-        // STEP 4 (read side of the learning loop): every review run — including ones on a
-        // completely different PR than the one that originally taught a rule — loads whatever
-        // has accumulated in ai-reviewer/learned-rules.json so far. This only sees rules that
-        // were committed and merged (see the commit-to-git note on RuleStore's save()); anything
-        // learned locally but not yet pushed/merged will not show up here on a fresh checkout.
+        // Loads any rules committed to ai-reviewer/learned-rules.json so far (see RuleStore).
         List<RuleStore.LearnedRule> learnedRules = new RuleStore().load();
         if (!learnedRules.isEmpty()) {
-            // STEP 5 — the exact splice point: learned rules are inserted as a new
-            // "LEARNED RULES:" section immediately before "UNIVERSAL OUTPUT FORMAT:" — i.e.
-            // after the fixed category rules above, but before the model is told how to format
-            // its answer, so the extra rules read like additional review criteria rather than
-            // output-formatting instructions.
-            //
-            // Before the splice, this part of the prompt reads:
-            //   ...
-            //   - Logging: Only flag plain standard output statements (e.g., System.out.println, printStackTrace).
-            //
-            //   UNIVERSAL OUTPUT FORMAT:
-            //   - If a category passes, print exactly: [Category Name]: STATUS: [PASSED]
-            //   ...
-            //
-            // After the splice (example, with two learned rules), it reads:
-            //   ...
-            //   - Logging: Only flag plain standard output statements (e.g., System.out.println, printStackTrace).
-            //
-            //   LEARNED RULES:
-            //   - Use a proper logger instead of System.out.println, even in test setup code.
-            //   - Never hardcode Thread.sleep; use Playwright's built-in waiting instead.
-            //
-            //   UNIVERSAL OUTPUT FORMAT:
-            //   - If a category passes, print exactly: [Category Name]: STATUS: [PASSED]
-            //   ...
+            // Insert learned rules right before "UNIVERSAL OUTPUT FORMAT:" so they read as
+            // extra review criteria rather than output-formatting instructions.
             StringBuilder learnedRulesSection = new StringBuilder("LEARNED RULES:\n");
             for (RuleStore.LearnedRule learnedRule : learnedRules) {
                 learnedRulesSection.append("- ").append(learnedRule.rule).append("\n");
@@ -970,11 +858,6 @@ public class LocalCodeReviewer {
             learnedRulesSection.append("\n");
             systemPrompt = systemPrompt.replace("UNIVERSAL OUTPUT FORMAT:", learnedRulesSection + "UNIVERSAL OUTPUT FORMAT:");
         }
-        // When learnedRules is empty, the block above never executes, so systemPrompt is left
-        // exactly as the text block defined above — byte-for-byte identical to what this method
-        // produced before the learning loop existed. Nothing downstream (the sanitization below,
-        // or JSON payload assembly) can distinguish "learning loop not present" from "learning
-        // loop present but learned-rules.json is empty or missing."
 
         String sanitizedSystemPrompt = systemPrompt
                 .replace("\\", "\\\\")
@@ -982,9 +865,8 @@ public class LocalCodeReviewer {
                 .replace("\n", "\\n")
                 .replace("\r", "\\r");
 
-        // Assemble raw JSON manually applying the sanitization
         String rawJson = "{"
-                + "\"model\":\"qwen2.5-coder:14b\"," // Upgraded brain
+                + "\"model\":\"qwen2.5-coder:14b\","
                 + "\"stream\":false,"
                 + "\"messages\":["
                 + "{\"role\":\"system\",\"content\":\"" + sanitizedSystemPrompt + "\"},"
@@ -993,11 +875,10 @@ public class LocalCodeReviewer {
                 + "\"options\":{"
                 + "\"temperature\":0.0,"
                 + "\"top_p\":0.1,"
-                + "\"num_ctx\":16384" // Injected 16k Context Window mapping here
+                + "\"num_ctx\":16384"
                 + "}"
                 + "}";
-        // Use GSON to parse the manual JSON payload to ensure validity and format
-        // correctly
+        // Round-trip through Gson to validate and normalize the manually-built JSON.
         Gson gson = new Gson();
         JsonObject payloadObject = gson.fromJson(rawJson, JsonObject.class);
         String jsonPayload = gson.toJson(payloadObject);
