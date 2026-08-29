@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -55,7 +56,7 @@ public class LearningLoop {
         String prNumber = GitHubContext.pullRequestNumber();
         String apiBase = GitHubContext.apiBase();
         String token = GitHubContext.token();
-        String botUsername = System.getenv("GITHUB_BOT_USERNAME");
+        String botUsername = OllamaConfig.githubBotUsername();
 
         JsonArray comments = fetchPullRequestComments(repo, prNumber, apiBase, token);
 
@@ -95,7 +96,10 @@ public class LearningLoop {
                 } catch (Exception ex) {
                     failedExtractionCount++;
                     LOGGER.info("[LEARN] Comment: " + body);
-                    LOGGER.info("[LEARN] Skipped — rule extraction failed: " + ex.getMessage());
+                    // Log the full exception (class + stack trace), not just getMessage() — some
+                    // exceptions (e.g. NullPointerException from an unchecked null field access)
+                    // have a null message, which would otherwise leave this undiagnosable.
+                    LOGGER.log(Level.WARNING, "[LEARN] Skipped — rule extraction failed", ex);
                     continue;
                 }
                 LOGGER.info("[LEARN] Comment: " + body);

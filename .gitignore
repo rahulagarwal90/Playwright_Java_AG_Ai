@@ -34,5 +34,8 @@ Thumbs.db
 .apt_generated/
 .apt_generated_tests/
 
+# ai-reviewer local config — personal, untracked; copy from config.properties.example
+ai-reviewer/config.properties
+
 # Claude Code
 CLAUDE.md

@@ -87,7 +87,7 @@ public class OllamaReviewClient {
         JsonObject options = new JsonObject();
         options.addProperty("temperature", 0.0);
         options.addProperty("top_p", 0.1);
-        options.addProperty("num_ctx", 16384);
+        options.addProperty("num_ctx", OllamaConfig.numCtx());
 
         Gson gson = new Gson();
         JsonObject payload = new JsonObject();
@@ -98,7 +98,7 @@ public class OllamaReviewClient {
         payload.add("options", options);
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:11434/api/chat"))
+                .uri(URI.create(OllamaConfig.baseUrl() + "/api/chat"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload), StandardCharsets.UTF_8))
                 .build();
@@ -109,7 +109,7 @@ public class OllamaReviewClient {
                         LOGGER.severe("\n[ERROR] Failed to connect to local Ollama service.");
                         LOGGER.info(
                                 "[HELP] Please ensure Ollama is installed and running via: ollama run " + OllamaConfig.model());
-                        LOGGER.info("[HELP] Ensure the Ollama port is accessible at: http://localhost:11434");
+                        LOGGER.info("[HELP] Ensure the Ollama port is accessible at: " + OllamaConfig.baseUrl());
                         throw new RuntimeException("Ollama connection failed", throwable);
                     }
                     if (response.statusCode() != 200) {

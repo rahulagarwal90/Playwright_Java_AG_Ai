@@ -1,0 +1,12 @@
+# Ollama model. qwen3:14b also tested. Avoid 32b+ on 24GB RAM machines — insufficient margin.
+ollama.model=qwen2.5-coder:14b
+
+# Ollama server address — change only if not running on localhost.
+ollama.baseUrl=http://localhost:11434
+
+# Context window size. Larger diffs need more; costs more memory per request.
+ollama.numCtx=16384
+
+# Reviewer bot's own GitHub login — excludes its comments from learn mode, so it never learns
+# from its own output. Leave unset and this filtering silently doesn't happen.
+github.botUsername=AiReviewer-bot

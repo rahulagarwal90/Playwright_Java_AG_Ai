@@ -1,5 +1,6 @@
 package com.ai.reviewer.learning;
 
+import com.ai.reviewer.ModuleRoot;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
@@ -41,38 +42,11 @@ public class RuleStore {
 
     /**
      * Resolves the store path so it always lands at <module-root>/learned-rules.json,
-     * regardless of the JVM's working directory (which varies across `mvn exec:java` run from
-     * the module root, from the repository root, or from whatever directory a Jenkins pipeline
-     * step happens to be in). Anchors on where this class was actually loaded from — not on
-     * matching the working directory's name — so it stays correct no matter how or from where
-     * the reviewer is invoked.
+     * regardless of the JVM's working directory — see ModuleRoot for how the module root
+     * itself is found.
      */
     private static Path resolveDefaultStorePath() {
-        return resolveModuleRoot().resolve("learned-rules.json");
-    }
-
-    /**
-     * Locates the ai-reviewer module root by walking up from wherever this class was loaded
-     * from (target/classes during a normal Maven build, or the jar file itself if packaged)
-     * until a directory containing this module's own pom.xml is found.
-     */
-    private static Path resolveModuleRoot() {
-        try {
-            Path codeSource = Path.of(
-                    RuleStore.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-            Path candidate = Files.isDirectory(codeSource) ? codeSource : codeSource.getParent();
-            while (candidate != null) {
-                if (Files.exists(candidate.resolve("pom.xml"))) {
-                    return candidate;
-                }
-                candidate = candidate.getParent();
-            }
-        } catch (Exception e) {
-            // Fall through to the working-directory fallback below.
-        }
-        // Last-resort fallback for environments where the code source can't be resolved (e.g.
-        // an unusual classloader setup): assume the JVM's working directory is already correct.
-        return Path.of("").toAbsolutePath();
+        return ModuleRoot.resolve(RuleStore.class).resolve("learned-rules.json");
     }
 
     /**
