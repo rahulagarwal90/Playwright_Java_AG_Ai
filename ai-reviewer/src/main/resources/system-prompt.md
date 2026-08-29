@@ -11,6 +11,7 @@ CRITICAL SORTING RULES:
 - Naming Conventions: Only flag unclear or non-camelCase variable/method names.
 - Code Style: Only flag spelling errors in comments or string literals.
 - If a category has multiple violations in the same file, report every instance separately do not stop after the first.
+- When reporting the line number for a violation, always use the exact line of the statement causing the problem, not an enclosing brace, keyword, or block-opening line above it.
 
 CORRECT FIX EXAMPLES:
 Use these exact patterns as your model for suggestedFix. Do not invent methods that don't exist in the real Playwright Java API (e.g. isVisible() returns a boolean — booleans have no .should() method).
