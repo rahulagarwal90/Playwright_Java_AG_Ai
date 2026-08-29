@@ -2,6 +2,7 @@ package com.ai.reviewer;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -18,8 +19,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -30,7 +29,6 @@ import java.util.stream.Collectors;
 public class LocalCodeReviewer {
 
     private static final Logger LOGGER = Logger.getLogger(LocalCodeReviewer.class.getName());
-    private static final Pattern INLINE_STATUS_PATTERN = Pattern.compile("(?i)^(.+?):\\s*STATUS:\\s*\\[?(FAILED|PASSED)\\]?");
     private final HttpClient httpClient;
 
     /**
@@ -128,7 +126,8 @@ public class LocalCodeReviewer {
      */
     private String getLocalGitDiff() throws Exception {
         // Natively targets both unstaged and staged changes in a single raw stream
-        ProcessBuilder pb = new ProcessBuilder("git", "diff", "HEAD", "--", ".", ":!**/LocalCodeReviewer.java");
+        ProcessBuilder pb = new ProcessBuilder("git", "diff", "HEAD", "--", ".",
+                ":!**/LocalCodeReviewer.java", ":!**/system-prompt.md");
         Process process = pb.start();
         String diffText;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
@@ -371,118 +370,43 @@ public class LocalCodeReviewer {
     }
 
     /**
-     * Parses AI review feedback text into structured ReviewFinding objects. Tolerant of
-     * formatting variance in model output (bold/bracket decorations, inline or standalone
-     * STATUS, multi-line Problem/Fix fields) since STATUS: FAILED must be reliably detected
-     * to post GitHub comments.
+     * Parses the AI review response — a JSON object matching FINDINGS_RESPONSE_SCHEMA, i.e.
+     * {"findings": [{category, status, file, line, problem, suggestedFix}, ...]} — into
+     * structured ReviewFinding objects. Ollama's structured-output mode constrains the model
+     * to this exact shape, so no text-format tolerance is needed here.
      *
-     * @param reviewText The raw feedback text from Ollama AI model
+     * @param reviewJson The raw JSON response content from the Ollama model
      * @return List of ReviewFinding objects with category, status, file, line, problem, and fix
      */
-    static List<ReviewFinding> parseReviewFindings(String reviewText) {
+    static List<ReviewFinding> parseReviewFindings(String reviewJson) {
         List<ReviewFinding> findings = new ArrayList<>();
-        if (reviewText == null || reviewText.isBlank()) {
+        if (reviewJson == null || reviewJson.isBlank()) {
             return findings;
         }
 
-        // Normalize line endings and split blocks by blank lines (each block = one category's review)
-        String normalized = reviewText.replace("\r\n", "\n").replace("\r", "\n");
-        String[] blocks = normalized.split("\\n\\s*\\n+");
+        JsonObject root = new Gson().fromJson(reviewJson, JsonObject.class);
+        JsonArray findingsArray = (root != null) ? root.getAsJsonArray("findings") : null;
+        if (findingsArray == null) {
+            return findings;
+        }
 
-        for (String block : blocks) {
-            String trimmed = block.trim();
-            if (trimmed.isEmpty()) {
-                continue;
-            }
-
-            // Strip decorations like **bold** or [brackets] from the category name.
-            String[] lines = trimmed.split("\\n");
-            String categoryLine = lines[0].trim();
-
-            // Some model responses emit "Category: STATUS: FAILED" on one line.
-            String status = "PASSED";
-            Matcher inlineStatusMatcher = INLINE_STATUS_PATTERN.matcher(categoryLine);
-            if (inlineStatusMatcher.find()) {
-                categoryLine = inlineStatusMatcher.group(1).trim();
-                status = inlineStatusMatcher.group(2).toUpperCase();
-            }
-
-            String category = categoryLine.replaceAll("^\\*\\*", "")
-                    .replaceAll("\\*\\*$", "")
-                    .replaceAll("^\\[", "")
-                    .replaceAll("\\]$", "")
-                    .replaceAll(":$", "")
-                    .trim();
-
-            // STATUS may be inline or on its own line; fall back to a dedicated field lookup.
-            if ("PASSED".equals(status)) {
-                status = extractSingleLineField(trimmed, "STATUS")
-                        .map(value -> value.replaceAll("\\[|\\]", "").trim().toUpperCase())
-                        .orElse("PASSED");
-            }
-
-            String file = extractSingleLineField(trimmed, "File").orElse("");
-            String lineValue = extractSingleLineField(trimmed, "Line")
-                    .or(() -> extractSingleLineField(trimmed, "Lines"))
-                    .orElse("0");
-            int lineNumber = 0;
-            try {
-                // Handle line ranges (e.g., "41, 42" or "350-360") by taking the first number
-                String firstLineToken = lineValue.split("[,\\s-]+")[0].trim();
-                lineNumber = Integer.parseInt(firstLineToken);
-            } catch (Exception ignored) {
-                lineNumber = 0;
-            }
-            String problem = extractFieldBody(trimmed, "Problem").orElse("");
-            String suggestedFix = extractFieldBody(trimmed, "AI Suggested Fix").orElse("");
-
+        for (JsonElement element : findingsArray) {
+            JsonObject obj = element.getAsJsonObject();
             ReviewFinding finding = new ReviewFinding();
-            finding.category = category.replaceAll("\\*|\\[|\\]", "").trim();
-            finding.status = status.isBlank() ? "PASSED" : status;
-            finding.file = file.trim();
-            finding.line = lineNumber;
-            finding.problem = problem.trim();
-            finding.suggestedFix = suggestedFix.trim();
+            finding.category = jsonFieldAsString(obj, "category");
+            finding.status = jsonFieldAsString(obj, "status");
+            finding.file = jsonFieldAsString(obj, "file");
+            finding.line = obj.has("line") && obj.get("line").isJsonPrimitive() ? obj.get("line").getAsInt() : 0;
+            finding.problem = jsonFieldAsString(obj, "problem");
+            finding.suggestedFix = jsonFieldAsString(obj, "suggestedFix");
             findings.add(finding);
         }
 
         return findings;
     }
 
-    /**
-     * Extracts a single-line field value from review text.
-     * Example: "STATUS: FAILED" → returns "FAILED"
-     * 
-     * @param text The review block text to search
-     * @param fieldName The field name (e.g., "STATUS", "Line", "File")
-     * @return Optional containing the field value, or empty if not found
-     */
-    private static Optional<String> extractSingleLineField(String text, String fieldName) {
-        Pattern fieldPattern = Pattern.compile("(?im)^\\s*" + Pattern.quote(fieldName) + ":\\s*(.*)$");
-        Matcher matcher = fieldPattern.matcher(text);
-        if (matcher.find()) {
-            return Optional.ofNullable(matcher.group(1));
-        }
-        return Optional.empty();
-    }
-
-    /**
-     * Extracts a potentially multi-line field value from review text.
-     * Example: "Problem: ... content ...\nAI Suggested Fix: ..." → returns multi-line content before next field
-     * 
-     * Used for fields like "Problem" and "AI Suggested Fix" which may span multiple lines.
-     * 
-     * @param text The review block text to search
-     * @param fieldName The field name (e.g., "Problem", "AI Suggested Fix")
-     * @return Optional containing the field value including all lines until the next field, or empty if not found
-     */
-    private static Optional<String> extractFieldBody(String text, String fieldName) {
-        Pattern fieldPattern = Pattern.compile("(?ims)" + Pattern.quote(fieldName) + ":\\s*(.*?)(?=^\\s*[A-Za-z0-9 _\\[\\]-]+?:\\s*|\\z)");
-        Matcher matcher = fieldPattern.matcher(text);
-        if (matcher.find()) {
-            return Optional.ofNullable(matcher.group(1));
-        }
-        return Optional.empty();
+    private static String jsonFieldAsString(JsonObject obj, String fieldName) {
+        return (obj.has(fieldName) && obj.get(fieldName).isJsonPrimitive()) ? obj.get(fieldName).getAsString() : "";
     }
 
     /**
@@ -751,6 +675,21 @@ public class LocalCodeReviewer {
     }
 
     /**
+     * JSON schema for the structured Ollama response from extractRuleFromComment(): a single
+     * {"rule": "<one imperative sentence>"} object — see FINDINGS_RESPONSE_SCHEMA_JSON above
+     * for the same structured-output approach applied to the main review call.
+     */
+    private static final String RULE_RESPONSE_SCHEMA_JSON = """
+            {
+              "type": "object",
+              "properties": {
+                "rule": {"type": "string"}
+              },
+              "required": ["rule"]
+            }
+            """;
+
+    /**
      * Calls the local Ollama model with a minimal, single-purpose prompt that converts
      * a human code review comment into one imperative rule.
      */
@@ -760,7 +699,7 @@ public class LocalCodeReviewer {
         // Separate, minimal prompt — compression only, not code-quality judgment.
         JsonObject systemMessage = new JsonObject();
         systemMessage.addProperty("role", "system");
-        systemMessage.addProperty("content", "Convert this code review comment into one imperative rule, one line only, output nothing else.");
+        systemMessage.addProperty("content", "Convert this code review comment into a single imperative rule, one sentence.");
 
         JsonObject userMessage = new JsonObject();
         userMessage.addProperty("role", "user");
@@ -778,10 +717,11 @@ public class LocalCodeReviewer {
         payload.addProperty("model", "qwen2.5-coder:14b");
         payload.addProperty("stream", false);
         payload.add("messages", messages);
+        payload.add("format", gson.fromJson(RULE_RESPONSE_SCHEMA_JSON, JsonObject.class));
         payload.add("options", options);
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:11434/v1/chat/completions"))
+                .uri(URI.create("http://localhost:11434/api/chat"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload), StandardCharsets.UTF_8))
                 .build();
@@ -792,15 +732,9 @@ public class LocalCodeReviewer {
         }
 
         JsonObject jsonResponse = gson.fromJson(response.body(), JsonObject.class);
-        String content;
-        if (jsonResponse.has("message")) {
-            content = jsonResponse.getAsJsonObject("message").get("content").getAsString();
-        } else {
-            content = jsonResponse.getAsJsonArray("choices")
-                    .get(0).getAsJsonObject()
-                    .getAsJsonObject("message").get("content").getAsString();
-        }
-        return content.trim();
+        String content = jsonResponse.getAsJsonObject("message").get("content").getAsString();
+        JsonObject ruleResponse = gson.fromJson(content, JsonObject.class);
+        return ruleResponse.get("rule").getAsString().trim();
     }
 
     /**
@@ -832,61 +766,89 @@ public class LocalCodeReviewer {
     }
 
     /**
-     * Sends the prepared diff text to the local Ollama HTTP API and returns the model's review text.
+     * JSON schema for the structured Ollama response: {"findings": [{category, status, file,
+     * line, problem, suggestedFix}, ...]}, one entry per category assessed. Passed via the
+     * "format" field on /api/chat so Ollama constrains decoding to this exact shape instead of
+     * relying on the model to follow a free-text template — see
+     * https://docs.ollama.com/capabilities/structured-outputs.
+     */
+    private static final String FINDINGS_RESPONSE_SCHEMA_JSON = """
+            {
+              "type": "object",
+              "properties": {
+                "findings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "enum": ["Playwright Web Assertions", "Locator Robustness", "Hardcoded Configurations", "Logging", "Naming Conventions", "Code Style"]
+                      },
+                      "status": {"type": "string", "enum": ["FAILED", "PASSED"]},
+                      "file": {"type": "string"},
+                      "line": {"type": "integer"},
+                      "problem": {"type": "string"},
+                      "suggestedFix": {"type": "string"}
+                    },
+                    "required": ["category", "status", "file", "line", "problem", "suggestedFix"]
+                  }
+                }
+              },
+              "required": ["findings"]
+            }
+            """;
+
+    /**
+     * Sends the prepared diff text to the local Ollama HTTP API and returns the model's raw
+     * JSON review response (see FINDINGS_RESPONSE_SCHEMA_JSON), for parseReviewFindings() to parse.
      */
     public CompletableFuture<String> sendToOllama(String diffText) {
         String annotatedDiff = annotateDiffWithLineNumbers(diffText);
-
-        // Escape raw diff text for safe embedding in the JSON payload.
-        String sanitizedDiff = annotatedDiff
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r");
-
         String systemPrompt = loadSystemPromptTemplate();
 
         // Loads any rules committed to ai-reviewer/learned-rules.json so far (see RuleStore).
         List<RuleStore.LearnedRule> learnedRules = new RuleStore().load();
         if (!learnedRules.isEmpty()) {
-            // Insert learned rules right before "UNIVERSAL OUTPUT FORMAT:" so they read as
-            // extra review criteria rather than output-formatting instructions.
+            // Insert learned rules right before "OUTPUT FORMAT:" so they read as extra review
+            // criteria rather than output-formatting instructions.
             StringBuilder learnedRulesSection = new StringBuilder("LEARNED RULES:\n");
             for (RuleStore.LearnedRule learnedRule : learnedRules) {
                 learnedRulesSection.append("- ").append(learnedRule.rule).append("\n");
             }
             learnedRulesSection.append("\n");
-            systemPrompt = systemPrompt.replace("UNIVERSAL OUTPUT FORMAT:", learnedRulesSection + "UNIVERSAL OUTPUT FORMAT:");
+            systemPrompt = systemPrompt.replace("OUTPUT FORMAT:", learnedRulesSection + "OUTPUT FORMAT:");
         }
 
-        String sanitizedSystemPrompt = systemPrompt
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r");
+        JsonObject systemMessage = new JsonObject();
+        systemMessage.addProperty("role", "system");
+        systemMessage.addProperty("content", systemPrompt);
 
-        String rawJson = "{"
-                + "\"model\":\"qwen2.5-coder:14b\","
-                + "\"stream\":false,"
-                + "\"messages\":["
-                + "{\"role\":\"system\",\"content\":\"" + sanitizedSystemPrompt + "\"},"
-                + "{\"role\":\"user\",\"content\":\"" + sanitizedDiff + "\"}"
-                + "],"
-                + "\"options\":{"
-                + "\"temperature\":0.0,"
-                + "\"top_p\":0.1,"
-                + "\"num_ctx\":16384"
-                + "}"
-                + "}";
-        // Round-trip through Gson to validate and normalize the manually-built JSON.
+        JsonObject userMessage = new JsonObject();
+        userMessage.addProperty("role", "user");
+        userMessage.addProperty("content", annotatedDiff);
+
+        JsonArray messages = new JsonArray();
+        messages.add(systemMessage);
+        messages.add(userMessage);
+
+        JsonObject options = new JsonObject();
+        options.addProperty("temperature", 0.0);
+        options.addProperty("top_p", 0.1);
+        options.addProperty("num_ctx", 16384);
+
         Gson gson = new Gson();
-        JsonObject payloadObject = gson.fromJson(rawJson, JsonObject.class);
-        String jsonPayload = gson.toJson(payloadObject);
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", "qwen2.5-coder:14b");
+        payload.addProperty("stream", false);
+        payload.add("messages", messages);
+        payload.add("format", gson.fromJson(FINDINGS_RESPONSE_SCHEMA_JSON, JsonObject.class));
+        payload.add("options", options);
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:11434/v1/chat/completions"))
+                .uri(URI.create("http://localhost:11434/api/chat"))
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload), StandardCharsets.UTF_8))
                 .build();
 
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
@@ -904,20 +866,32 @@ public class LocalCodeReviewer {
                         throw new RuntimeException("Ollama non-200 status code: " + response.statusCode());
                     }
                     JsonObject jsonResponse = gson.fromJson(response.body(), JsonObject.class);
-                    String feedback;
-                    if (jsonResponse.has("message")) {
-                        feedback = jsonResponse.getAsJsonObject("message").get("content").getAsString();
-                    } else {
-                        feedback = jsonResponse.getAsJsonArray("choices")
-                                .get(0).getAsJsonObject()
-                                .getAsJsonObject("message").get("content").getAsString();
-                    }
+                    String feedback = jsonResponse.getAsJsonObject("message").get("content").getAsString();
                     LOGGER.info("\n==================================================");
                     LOGGER.info("                AI CODE REVIEW FEEDBACK           ");
                     LOGGER.info("==================================================");
-                    LOGGER.info(feedback);
+                    LOGGER.info(formatFindingsForLog(parseReviewFindings(feedback)));
                     LOGGER.info("==================================================");
                     return feedback;
                 });
+    }
+
+    /**
+     * Renders parsed findings back into the human-readable block format the terminal previously
+     * showed directly from the model's free text, now that sendToOllama() logs structured JSON.
+     */
+    private static String formatFindingsForLog(List<ReviewFinding> findings) {
+        StringBuilder sb = new StringBuilder();
+        for (ReviewFinding finding : findings) {
+            sb.append(finding.category).append(": STATUS: [").append(finding.status).append("]\n");
+            if ("FAILED".equalsIgnoreCase(finding.status)) {
+                sb.append("File: ").append(finding.file).append("\n");
+                sb.append("Line: ").append(finding.line).append("\n");
+                sb.append("Problem: ").append(finding.problem).append("\n");
+                sb.append("AI Suggested Fix:\n").append(finding.suggestedFix).append("\n");
+            }
+            sb.append("\n");
+        }
+        return sb.toString().stripTrailing();
     }
 }

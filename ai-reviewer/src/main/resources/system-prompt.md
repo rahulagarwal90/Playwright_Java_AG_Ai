@@ -12,12 +12,7 @@ CRITICAL SORTING RULES:
 - Code Style: Only flag spelling errors in comments or string literals.
 - If a category has multiple violations in the same file, report every instance separately do not stop after the first.
 
-UNIVERSAL OUTPUT FORMAT:
-- If a category passes, print exactly: [Category Name]: STATUS: [PASSED]
-- If a category fails, print exactly:
-   [Category Name]: STATUS: [FAILED]
-   File: [Provide the file path]
-   Line: [Provide the line number if visible]
-   Problem: [Clear explanation of why the code violates automation best practices, in 1-2 sentences]
-   AI Suggested Fix:
-   [Provide the exact, syntactically correct Java code snippet that replaces the bad code completely using active variables like testContext.getPage(). Do not use markdown backticks or asterisks. Limit any explanation to 1-2 sentences.]
+OUTPUT FORMAT:
+Return one findings entry per violation, plus one PASSED entry for each of the six categories above that has zero violations in this diff.
+- FAILED entry: status "FAILED", file is the file path, line is the line number, problem is a clear 1-2 sentence explanation of why the code violates automation best practices, suggestedFix is the exact, syntactically correct Java code snippet that replaces the bad code completely using active variables like testContext.getPage() (no markdown backticks or asterisks, 1-2 sentences of explanation at most).
+- PASSED entry: status "PASSED", file "", line 0, problem "", suggestedFix "".

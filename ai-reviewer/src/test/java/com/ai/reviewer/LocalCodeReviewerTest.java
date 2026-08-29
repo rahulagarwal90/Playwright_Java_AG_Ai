@@ -41,7 +41,10 @@ public class LocalCodeReviewerTest {
         HttpResponse<String> mockResponse = mock(HttpResponse.class);
 
         when(mockResponse.statusCode()).thenReturn(200);
-        when(mockResponse.body()).thenReturn("{\"message\":{\"content\":\"LGTM! No issues found with brittle locators.\"}}\n");
+        when(mockResponse.body()).thenReturn(
+                "{\"message\":{\"content\":\"{\\\"findings\\\":[{\\\"category\\\":\\\"Locator Robustness\\\","
+                + "\\\"status\\\":\\\"PASSED\\\",\\\"file\\\":\\\"\\\",\\\"line\\\":0,\\\"problem\\\":\\\"\\\","
+                + "\\\"suggestedFix\\\":\\\"\\\"}]}\"}}\n");
 
         CompletableFuture<HttpResponse<String>> futureResponse = CompletableFuture.completedFuture(mockResponse);
         when(mockClient.sendAsync(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
@@ -62,8 +65,9 @@ public class LocalCodeReviewerTest {
         CompletableFuture<String> resultFuture = reviewer.runReview();
         String result = resultFuture.get();
 
-        // Assert: the review result comes from the mocked Ollama response.
-        assertEquals("LGTM! No issues found with brittle locators.", result);
+        // Assert: the review result is the raw structured-output JSON from the mocked Ollama response.
+        assertEquals("{\"findings\":[{\"category\":\"Locator Robustness\",\"status\":\"PASSED\","
+                + "\"file\":\"\",\"line\":0,\"problem\":\"\",\"suggestedFix\":\"\"}]}", result);
 
         // Verify the outgoing request targets the local Ollama API and uses JSON.
         ArgumentCaptor<HttpRequest> requestCaptor = ArgumentCaptor.forClass(HttpRequest.class);
@@ -71,7 +75,7 @@ public class LocalCodeReviewerTest {
 
         HttpRequest request = requestCaptor.getValue();
         assertEquals("POST", request.method());
-        assertEquals(URI.create("http://localhost:11434/v1/chat/completions"), request.uri());
+        assertEquals(URI.create("http://localhost:11434/api/chat"), request.uri());
         assertEquals("application/json", request.headers().firstValue("Content-Type").orElse(""));
     }
 
