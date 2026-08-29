@@ -22,6 +22,11 @@ import java.util.logging.Logger;
 public class LocalCodeReviewer {
 
     private static final Logger LOGGER = Logger.getLogger(LocalCodeReviewer.class.getName());
+
+    // Placeholder runReview() returns instead of JSON when there's no diff to send to Ollama at
+    // all — never valid JSON, so main() must check for it before handing the result to FindingParser.
+    private static final String NO_CHANGES_RESULT = "No changes";
+
     private final HttpClient httpClient;
     private final DiffFetcher diffFetcher;
     private final OllamaReviewClient ollamaReviewClient;
@@ -47,22 +52,26 @@ public class LocalCodeReviewer {
                 new LearningLoop(reviewer.httpClient).run();
             } else {
                 String reviewJson = reviewer.runReview().join();
-                List<ReviewFinding> findings = FindingParser.parse(reviewJson);
-                List<ReviewFinding> failedFindings = findings.stream()
-                        .filter(finding -> "FAILED".equalsIgnoreCase(finding.status))
-                        .toList();
-                if (!failedFindings.isEmpty()) {
-                    LOGGER.severe("[ERROR] AI Code Quality Gate detected failures.");
-                    // False unless GITHUB_REPOSITORY, a PR number, and GITHUB_TOKEN are all set.
-                    if (GitHubContext.isPresent()) {
-                        LOGGER.info("[INFO] Posting line-level PR review comments to GitHub.");
-                        new GitHubCommentPoster(reviewer.httpClient).postComments(failedFindings);
+                // No diff was sent to Ollama at all, so there's nothing to parse or fail on —
+                // runReview() already logged why. Skip straight to a clean exit.
+                if (!NO_CHANGES_RESULT.equals(reviewJson)) {
+                    List<ReviewFinding> findings = FindingParser.parse(reviewJson);
+                    List<ReviewFinding> failedFindings = findings.stream()
+                            .filter(finding -> "FAILED".equalsIgnoreCase(finding.status))
+                            .toList();
+                    if (!failedFindings.isEmpty()) {
+                        LOGGER.severe("[ERROR] AI Code Quality Gate detected failures.");
+                        // False unless GITHUB_REPOSITORY, a PR number, and GITHUB_TOKEN are all set.
+                        if (GitHubContext.isPresent()) {
+                            LOGGER.info("[INFO] Posting line-level PR review comments to GitHub.");
+                            new GitHubCommentPoster(reviewer.httpClient).postComments(failedFindings);
+                        } else {
+                            LOGGER.info("[INFO] No PR context detected — findings printed to terminal only, GitHub posting skipped.");
+                        }
+                        exitCode = 1;
                     } else {
-                        LOGGER.info("[INFO] No PR context detected — findings printed to terminal only, GitHub posting skipped.");
+                        LOGGER.info("[INFO] AI Code Quality Gate passed. No failed categories detected.");
                     }
-                    exitCode = 1;
-                } else {
-                    LOGGER.info("[INFO] AI Code Quality Gate passed. No failed categories detected.");
                 }
             }
         } catch (Exception e) {
@@ -81,7 +90,7 @@ public class LocalCodeReviewer {
             if (filteredDiff.trim().isEmpty()) {
                 LOGGER.info("[INFO] No git changes detected.");
                 LOGGER.info(">>> Tip: Edit or stage files in git before running the code reviewer.");
-                return CompletableFuture.completedFuture("No changes");
+                return CompletableFuture.completedFuture(NO_CHANGES_RESULT);
             }
             LOGGER.info(">>> Sending changes to local Ollama (model: qwen2.5-coder:14b)...");
             return ollamaReviewClient.sendReview(filteredDiff)
