@@ -6,7 +6,7 @@ The previous documentation set (`README_INSTALLATION.md`, `README_IMPLEMENTATION
 
 ## 1. What this project is
 
-This repository is a two-module Maven project. `playwright-tests` is a Cucumber/Playwright browser automation framework (Page Objects, step definitions, feature files, Allure/JUnit reporting). `ai-reviewer` is a standalone Java tool that reads a git diff and asks a local Ollama model to review it against a fixed set of automation-quality categories (legacy assertions, brittle locators, hardcoded waits, console logging). Wired into Jenkins, it runs automatically on every GitHub pull request, posts inline PR comments for anything it flags as `FAILED`, and blocks merge until those are resolved. It also has a `learn` mode: a human can reply to one of its comments with `@ai-learn ...`, and the reviewer converts that feedback into a standing rule it applies to every future review.
+This repository is a two-module Maven project. `playwright-tests` is a Cucumber/Playwright browser automation framework (Page Objects, step definitions, feature files, Allure/JUnit reporting). `ai-reviewer` is a standalone Java tool that reads a git diff and asks a local Ollama model to review it against six fixed automation-quality categories — legacy assertions, brittle locators, hardcoded waits, console logging, naming conventions, code style — defined in `ai-reviewer/src/main/resources/system-prompt.md` and enforced via Ollama's structured-output JSON schema, not free-text parsing. Wired into Jenkins, it runs automatically on every GitHub pull request, posts inline PR comments for anything it flags as `FAILED`, and blocks merge until those are resolved. It also has a `learn` mode: a human can reply to one of its comments with `@ai-learn ...`, and the reviewer converts that feedback into a standing rule it applies to every future review.
 
 ---
 
@@ -49,7 +49,7 @@ Notes on step 4: without any GitHub PR context set, the reviewer reviews your lo
 
 ## 3. Environment variables
 
-Every environment variable `LocalCodeReviewer.java` reads, in one table:
+Every environment variable the reviewer reads, in one table. `GitHubContext` (`com.ai.reviewer.github`) reads `GITHUB_REPOSITORY`, `GITHUB_PR_NUMBER`, `CHANGE_ID`, `GITHUB_TOKEN`, `CHANGE_URL`, and `GITHUB_API_URL`; `CommitShaResolver` reads `GIT_COMMIT`; `LearningLoop` (`com.ai.reviewer.learning`) reads `GITHUB_BOT_USERNAME`.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
@@ -68,9 +68,27 @@ Every environment variable `LocalCodeReviewer.java` reads, in one table:
 
 ## 4. How the reviewer works
 
-A PR is opened or updated on GitHub, which notifies Jenkins (via the ngrok-tunneled webhook or periodic polling). Jenkins checks out the PR branch and runs the `ai-reviewer` module. The reviewer fetches the PR's diff from the GitHub API, filters it down to blocks that actually contain added or removed lines, and annotates added lines with their destination line numbers. That diff is sent to the local Ollama model (`qwen2.5-coder:14b`) along with a system prompt that defines four review categories — Playwright Web Assertions, Locator Robustness, Hardcoded Configurations, Logging — plus any rules learned from prior `@ai-learn` comments (see [Section 5](#5-the-learning-loop)). The model's plain-text response is parsed into structured findings, one per category, each marked `PASSED` or `FAILED`. Every `FAILED` finding is posted as an inline comment on the corresponding PR line via the GitHub REST API, and the Jenkins build is marked failed — which blocks merge until every category passes.
+### Architecture
 
-The inline-comment posting step only runs when real PR context is present: specifically, `GITHUB_REPOSITORY`, a PR number (`GITHUB_PR_NUMBER` or `CHANGE_ID`), and `GITHUB_TOKEN` must all be set, exactly as Jenkins provides them for a real PR build. Without that context — for example, running the reviewer directly on your machine against uncommitted local changes — findings are printed to the terminal only and GitHub posting is skipped. That's expected and is the normal way to use the reviewer for local testing.
+`ai-reviewer` is one small, focused class per job, grouped into subpackages under `com.ai.reviewer`:
+
+- **`com.ai.reviewer`** (top level) — `LocalCodeReviewer`, the entry point that wires everything else together and runs the review sequence described below; `ReviewFinding`, a plain data holder (category/status/file/line/problem/suggestedFix) with no logic of its own.
+- **`com.ai.reviewer.diff`** — `DiffFetcher` (gets the diff to review, either local `git diff` or a GitHub PR's diff) and `DiffLineAnnotator` (tags added lines with `[Line N]` so the model can report an exact line number back).
+- **`com.ai.reviewer.ollama`** — `OllamaReviewClient` (builds the review prompt and calls Ollama) and `FindingParser` (turns Ollama's JSON response into `ReviewFinding` objects, and back into readable terminal text).
+- **`com.ai.reviewer.github`** — `GitHubContext` (the single place that reads GitHub PR identity out of environment variables), `GitHubCommentPoster` (posts inline PR comments), and its two helpers `CommitShaResolver` (which commit to anchor a comment to) and `ChangedFilePathResolver` (matching an AI-reported file path to one of the PR's actual changed files).
+- **`com.ai.reviewer.learning`** — `LearningLoop` (the `@ai-learn` workflow — see [Section 5](#5-the-learning-loop)) and `RuleStore` (reads/writes `ai-reviewer/learned-rules.json`).
+
+### Review flow
+
+A PR is opened or updated on GitHub, which notifies Jenkins (via the ngrok-tunneled webhook or periodic polling). Jenkins checks out the PR branch and runs the `ai-reviewer` module. `DiffFetcher` fetches the PR's diff from the GitHub API and filters it down to blocks that actually contain added or removed lines; `DiffLineAnnotator` tags added lines with their destination line numbers.
+
+`OllamaReviewClient` sends that diff to the local Ollama model (`qwen2.5-coder:14b`) via its native `/api/chat` endpoint, along with a system prompt loaded at runtime from `ai-reviewer/src/main/resources/system-prompt.md`. That prompt defines six review categories — Playwright Web Assertions, Locator Robustness, Hardcoded Configurations, Logging, Naming Conventions, Code Style — plus any rules learned from prior `@ai-learn` comments, spliced in under a `LEARNED RULES:` heading right before the prompt's output-format instructions.
+
+The request's `format` field carries a JSON schema that puts Ollama into structured-output mode, constraining its response to exactly `{"findings": [{category, status, file, line, problem, suggestedFix}, ...]}` — one entry per category assessed, `status` either `PASSED` or `FAILED`. This is why `FindingParser` can just read the JSON directly into `ReviewFinding` objects instead of regex-parsing free text as earlier versions of this tool did. (Known limitation: the model reliably emits `FAILED` entries but tends to skip `PASSED` ones for categories with nothing to report — the schema enforces the response's structure, not its completeness.)
+
+Every `FAILED` finding is posted as an inline comment on the corresponding PR line by `GitHubCommentPoster` via the GitHub REST API, and the Jenkins build is marked failed — which blocks merge until every category passes.
+
+The inline-comment posting step only runs when real PR context is present: specifically, `GITHUB_REPOSITORY`, a PR number (`GITHUB_PR_NUMBER` or `CHANGE_ID`), and `GITHUB_TOKEN` must all be set, exactly as Jenkins provides them for a real PR build (`GitHubContext.isPresent()`). Without that context — for example, running the reviewer directly on your machine against uncommitted local changes — findings are printed to the terminal only and GitHub posting is skipped. That's expected and is the normal way to use the reviewer for local testing.
 
 ---
 
@@ -81,7 +99,7 @@ The reviewer can turn human feedback into a standing rule it enforces on every f
 1. A human replies to one of the reviewer's PR comments (or leaves a new one) prefixed with `@ai-learn`, e.g. `@ai-learn Never use System.out.println, even in test setup code — always use a logger.`
 2. Someone runs learn mode (see [Section 2](#2-daily-quick-start)) against that PR. It fetches every comment on the PR via the GitHub API and keeps only the ones whose body starts with `@ai-learn`.
 3. It also discards any matching comment authored by the bot account itself, identified by comparing the comment author's GitHub login against `GITHUB_BOT_USERNAME`. This filter exists because the reviewer must never learn from its own output — if it ingested its own prior review comments as though they were human feedback, it would just reinforce whatever mistakes produced that output in the first place.
-4. For each remaining comment, it calls the model with a separate, minimal prompt ("convert this into one imperative rule, one line only") to extract a single rule, and logs both the original comment and the extracted rule.
+4. For each remaining comment, `LearningLoop` calls the model with a separate, minimal prompt ("convert this into a single imperative rule, one sentence") to extract a single rule — using the same Ollama structured-output approach as the main review (a `{"rule": "<one imperative sentence>"}` JSON schema passed via `/api/chat`'s `format` field), so the extracted rule is read straight out of parsed JSON rather than trimmed from free text — and logs both the original comment and the extracted rule.
 5. Each rule is saved to `ai-reviewer/learned-rules.json` (via `RuleStore`, pretty-printed, de-duplicated by the original comment text so re-running learn mode on the same PR doesn't create duplicates).
 
 That file is a normal tracked file — it's committed to git like any other source file, not gitignored. Once it's committed and merged, every subsequent review run (including Jenkins') loads it and, if it contains any rules, appends them to the system prompt under a `LEARNED RULES:` heading before the model sees the diff — so the next review automatically enforces every rule learned so far.

@@ -1,4 +1,4 @@
-package com.ai.reviewer;
+package com.ai.reviewer.learning;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -107,7 +107,8 @@ public class RuleStore {
             }
             // This write is the actual persistence point of the learning loop: whatever is in
             // `deduped` here is exactly what the next `git status` will show as a change to
-            // learned-rules.json, and exactly what a future sendToOllama() call will read back.
+            // learned-rules.json, and exactly what a future OllamaReviewClient.sendReview() call
+            // will read back.
             try (Writer writer = Files.newBufferedWriter(storePath, StandardCharsets.UTF_8)) {
                 gson.toJson(new ArrayList<>(deduped.values()), writer);
             }
