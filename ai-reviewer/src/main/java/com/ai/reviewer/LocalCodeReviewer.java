@@ -5,6 +5,7 @@ import com.ai.reviewer.github.GitHubCommentPoster;
 import com.ai.reviewer.github.GitHubContext;
 import com.ai.reviewer.learning.LearningLoop;
 import com.ai.reviewer.ollama.FindingParser;
+import com.ai.reviewer.ollama.OllamaConfig;
 import com.ai.reviewer.ollama.OllamaReviewClient;
 import java.net.http.HttpClient;
 import java.util.List;
@@ -92,7 +93,7 @@ public class LocalCodeReviewer {
                 LOGGER.info(">>> Tip: Edit or stage files in git before running the code reviewer.");
                 return CompletableFuture.completedFuture(NO_CHANGES_RESULT);
             }
-            LOGGER.info(">>> Sending changes to local Ollama (model: qwen2.5-coder:14b)...");
+            LOGGER.info(">>> Sending changes to local Ollama (model: " + OllamaConfig.model() + ")...");
             return ollamaReviewClient.sendReview(filteredDiff)
                     .thenApply(reviewJson -> {
                         logFindingsToTerminal(reviewJson);

@@ -91,7 +91,7 @@ public class OllamaReviewClient {
 
         Gson gson = new Gson();
         JsonObject payload = new JsonObject();
-        payload.addProperty("model", "qwen2.5-coder:14b");
+        payload.addProperty("model", OllamaConfig.model());
         payload.addProperty("stream", false);
         payload.add("messages", messages);
         payload.add("format", gson.fromJson(FINDINGS_RESPONSE_SCHEMA_JSON, JsonObject.class));
@@ -108,7 +108,7 @@ public class OllamaReviewClient {
                     if (throwable != null) {
                         LOGGER.severe("\n[ERROR] Failed to connect to local Ollama service.");
                         LOGGER.info(
-                                "[HELP] Please ensure Ollama is installed and running via: ollama run qwen2.5-coder:14b");
+                                "[HELP] Please ensure Ollama is installed and running via: ollama run " + OllamaConfig.model());
                         LOGGER.info("[HELP] Ensure the Ollama port is accessible at: http://localhost:11434");
                         throw new RuntimeException("Ollama connection failed", throwable);
                     }

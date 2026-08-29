@@ -49,7 +49,7 @@ Notes on step 4: without any GitHub PR context set, the reviewer reviews your lo
 
 ## 3. Environment variables
 
-Every environment variable the reviewer reads, in one table. `GitHubContext` (`com.ai.reviewer.github`) reads `GITHUB_REPOSITORY`, `GITHUB_PR_NUMBER`, `CHANGE_ID`, `GITHUB_TOKEN`, `CHANGE_URL`, and `GITHUB_API_URL`; `CommitShaResolver` reads `GIT_COMMIT`; `LearningLoop` (`com.ai.reviewer.learning`) reads `GITHUB_BOT_USERNAME`.
+Every environment variable the reviewer reads, in one table. `GitHubContext` (`com.ai.reviewer.github`) reads `GITHUB_REPOSITORY`, `GITHUB_PR_NUMBER`, `CHANGE_ID`, `GITHUB_TOKEN`, `CHANGE_URL`, and `GITHUB_API_URL`; `CommitShaResolver` reads `GIT_COMMIT`; `LearningLoop` (`com.ai.reviewer.learning`) reads `GITHUB_BOT_USERNAME`; `OllamaConfig` (`com.ai.reviewer.ollama`) reads `OLLAMA_MODEL`.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
@@ -61,8 +61,20 @@ Every environment variable the reviewer reads, in one table. `GitHubContext` (`c
 | `GITHUB_API_URL` | Overrides the GitHub REST API base URL, e.g. for GitHub Enterprise. Defaults to `https://api.github.com` if unset. | Review + Learn (optional) |
 | `GIT_COMMIT` | Commit SHA used to anchor inline PR comments to the right diff. Falls back to `git rev-parse HEAD` locally if unset; Jenkins sets this for you. | Review only (optional) |
 | `GITHUB_BOT_USERNAME` | The reviewer bot's own GitHub login. Comments authored by this account are excluded when learn mode ingests `@ai-learn` comments. | Learn only |
+| `OLLAMA_MODEL` | Which Ollama model to call, for both the main review and `@ai-learn` rule extraction. Defaults to `qwen2.5-coder:14b` if unset. See below for guidance on picking a different model. | Review + Learn (optional) |
 
 `GITHUB_REPOSITORY`, a PR number (`GITHUB_PR_NUMBER` or `CHANGE_ID`), and `GITHUB_TOKEN` together are what the code calls "GitHub context" — all three must be present for either mode to talk to the GitHub API at all.
+
+### Choosing an Ollama model
+
+```bash
+export OLLAMA_MODEL="qwen3:14b"
+```
+
+The reviewer works with any Ollama model that supports structured JSON output (which is a decoding-time constraint the Ollama engine enforces, not a per-model feature, so this covers effectively all current chat models pulled through `ollama pull`). Two things to know before switching:
+
+- **Wording varies by model.** The same prompt against a different model can produce differently-worded `problem`/`suggestedFix` text even when the underlying defect it catches is identical. Don't assume byte-for-byte identical output across models — compare on whether the right defects are caught, not on exact phrasing.
+- **Match the model size to your hardware.** A `14b` model (~9GB on disk, quantized) fits comfortably on 24GB of unified memory alongside everything else running. Larger models (`32b` and up) do not have a safe margin at that RAM size — don't switch to one without more memory to spare, or you'll see Ollama fail or the machine swap heavily under load.
 
 ---
 
@@ -82,7 +94,7 @@ Every environment variable the reviewer reads, in one table. `GitHubContext` (`c
 
 A PR is opened or updated on GitHub, which notifies Jenkins (via the ngrok-tunneled webhook or periodic polling). Jenkins checks out the PR branch and runs the `ai-reviewer` module. `DiffFetcher` fetches the PR's diff from the GitHub API and filters it down to blocks that actually contain added or removed lines; `DiffLineAnnotator` tags added lines with their destination line numbers.
 
-`OllamaReviewClient` sends that diff to the local Ollama model (`qwen2.5-coder:14b`) via its native `/api/chat` endpoint, along with a system prompt loaded at runtime from `ai-reviewer/src/main/resources/system-prompt.md`. That prompt defines six review categories — Playwright Web Assertions, Locator Robustness, Hardcoded Configurations, Logging, Naming Conventions, Code Style — plus any rules learned from prior `@ai-learn` comments, spliced in under a `LEARNED RULES:` heading right before the prompt's output-format instructions.
+`OllamaReviewClient` sends that diff to the local Ollama model (`qwen2.5-coder:14b` by default — see [`OLLAMA_MODEL`](#3-environment-variables)) via its native `/api/chat` endpoint, along with a system prompt loaded at runtime from `ai-reviewer/src/main/resources/system-prompt.md`. That prompt defines six review categories — Playwright Web Assertions, Locator Robustness, Hardcoded Configurations, Logging, Naming Conventions, Code Style — plus any rules learned from prior `@ai-learn` comments, spliced in under a `LEARNED RULES:` heading right before the prompt's output-format instructions.
 
 The request's `format` field carries a JSON schema that puts Ollama into structured-output mode, constraining its response to exactly `{"findings": [{category, status, file, line, problem, suggestedFix}, ...]}` — one entry per category assessed, `status` either `PASSED` or `FAILED`. This is why `FindingParser` can just read the JSON directly into `ReviewFinding` objects instead of regex-parsing free text as earlier versions of this tool did. (Known limitation: the model reliably emits `FAILED` entries but tends to skip `PASSED` ones for categories with nothing to report — the schema enforces the response's structure, not its completeness.)
 

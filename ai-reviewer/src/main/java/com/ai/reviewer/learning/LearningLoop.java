@@ -1,6 +1,7 @@
 package com.ai.reviewer.learning;
 
 import com.ai.reviewer.github.GitHubContext;
+import com.ai.reviewer.ollama.OllamaConfig;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -155,7 +156,7 @@ public class LearningLoop {
         options.addProperty("temperature", 0.0);
 
         JsonObject payload = new JsonObject();
-        payload.addProperty("model", "qwen2.5-coder:14b");
+        payload.addProperty("model", OllamaConfig.model());
         payload.addProperty("stream", false);
         payload.add("messages", messages);
         payload.add("format", gson.fromJson(RULE_RESPONSE_SCHEMA_JSON, JsonObject.class));
