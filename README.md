@@ -45,6 +45,8 @@ mvn -pl playwright-tests clean test
 
 Notes on step 4: without any GitHub PR context set, the reviewer reviews your local `git diff HEAD` and prints findings to the terminal only — that's the normal way to sanity-check changes before pushing. See [Section 4](#4-how-the-reviewer-works) for what changes when real PR context is present.
 
+**Stopping Ollama**: if you started it with `ollama serve` in a visible terminal tab, `Ctrl+C` in that tab. If it's running in the background or you've lost track of which terminal it's in, `pkill ollama`.
+
 ---
 
 ## 3. Environment variables
