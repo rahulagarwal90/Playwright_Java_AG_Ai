@@ -110,7 +110,7 @@ public class SurefireReportReader {
     // Locates the repo root by walking up from wherever this class was loaded from until a
     // directory containing both sibling modules is found, so this works regardless of the JVM's
     // working directory (mirrors ai-reviewer's ModuleRoot, kept self-contained here since
-    // healer-core has no dependency on the ai-reviewer module).
+    // ai-healer has no dependency on the ai-reviewer module).
     private static Path findRepoRoot() {
         try {
             Path codeSource = Path.of(

@@ -18,10 +18,10 @@
     </properties>
 
     <dependencies>
-        <!-- Healer core (shared sanitization utility used by Hooks for artifact filenames) -->
+        <!-- AI Healer (shared sanitization utility used by Hooks for artifact filenames) -->
         <dependency>
             <groupId>com.antigravity.playwright</groupId>
-            <artifactId>healer-core</artifactId>
+            <artifactId>ai-healer</artifactId>
             <version>${project.version}</version>
         </dependency>
 

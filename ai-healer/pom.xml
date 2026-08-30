@@ -11,7 +11,7 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>healer-core</artifactId>
+    <artifactId>ai-healer</artifactId>
 
     <dependencies>
         <!-- GSON -->

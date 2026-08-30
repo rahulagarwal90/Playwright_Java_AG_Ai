@@ -11,8 +11,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 
 /**
- * The one class in healer-core that talks to Ollama. Deliberately self-contained rather than
- * reusing ai-reviewer's OllamaConfig/OllamaReviewClient — healer-core has no dependency on the
+ * The one class in ai-healer that talks to Ollama. Deliberately self-contained rather than
+ * reusing ai-reviewer's OllamaConfig/OllamaReviewClient — ai-healer has no dependency on the
  * ai-reviewer module, and whether to share a config layer across modules is parked for later.
  * Model and base URL resolve the same way ai-reviewer's OllamaConfig does (env var, falling back
  * to a hardcoded default), just without the config.properties file layer.
