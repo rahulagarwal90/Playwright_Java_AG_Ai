@@ -44,6 +44,7 @@ public class SurefireReportReaderTest {
         assertEquals("User Login Flow", timeoutFailure.className);
         assertEquals("com.microsoft.playwright.TimeoutError", timeoutFailure.failureType);
         assertEquals("Timeout 30000ms exceeded.", timeoutFailure.failureMessage);
+        assertEquals("stack trace", timeoutFailure.stackTrace);
         assertTrue(timeoutFailure.domSnapshotFound);
         assertEquals(
                 snapshotsDir.resolve("Standard_User_can_login_successfully-dom.json"),

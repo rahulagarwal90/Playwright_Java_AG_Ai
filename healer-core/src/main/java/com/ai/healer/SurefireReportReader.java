@@ -71,6 +71,7 @@ public class SurefireReportReader {
                 failure.className = testcase.getAttribute("classname");
                 failure.failureType = failureNode.getAttribute("type");
                 failure.failureMessage = failureNode.getAttribute("message");
+                failure.stackTrace = failureNode.getTextContent();
                 resolveDomSnapshot(failure);
                 failures.add(failure);
             }

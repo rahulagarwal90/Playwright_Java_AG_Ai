@@ -10,6 +10,7 @@ public class TestFailure {
     public String className;
     public String failureType;
     public String failureMessage;
+    public String stackTrace;
     public Path domSnapshotPath;
     public boolean domSnapshotFound;
 }
