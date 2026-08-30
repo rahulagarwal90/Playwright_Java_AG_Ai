@@ -18,6 +18,13 @@
     </properties>
 
     <dependencies>
+        <!-- Healer core (shared sanitization utility used by Hooks for artifact filenames) -->
+        <dependency>
+            <groupId>com.antigravity.playwright</groupId>
+            <artifactId>healer-core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
         <!-- Playwright -->
         <dependency>
             <groupId>com.microsoft.playwright</groupId>

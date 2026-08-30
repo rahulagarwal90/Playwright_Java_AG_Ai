@@ -10,6 +10,7 @@
     <packaging>pom</packaging>
 
     <modules>
+        <module>healer-core</module>
         <module>playwright-tests</module>
         <module>ai-reviewer</module>
     </modules>

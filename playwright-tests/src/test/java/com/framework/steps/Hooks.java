@@ -1,5 +1,6 @@
 package com.framework.steps;
 
+import com.ai.healer.ScenarioNameSanitizer;
 import com.framework.core.PlaywrightFactory;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Tracing;
@@ -58,7 +59,7 @@ public class Hooks {
             }
 
             stepCounter++;
-            String safeName = scenario.getName().replaceAll("[^a-zA-Z0-9_-]", "_");
+            String safeName = ScenarioNameSanitizer.sanitize(scenario.getName());
             Path screenshotDir = Paths.get("target/screenshots");
             if (Files.notExists(screenshotDir)) {
                 Files.createDirectories(screenshotDir);
