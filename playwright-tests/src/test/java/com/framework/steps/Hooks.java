@@ -21,7 +21,8 @@ public class Hooks {
         "target/allure-results",
         "target/screenshots",
         "target/traces",
-        "target/videos"
+        "target/videos",
+        "target/dom-snapshots"
     };
     private static boolean reportsCleared = false;
     private int stepCounter = 0;
@@ -94,13 +95,30 @@ public class Hooks {
             logger.error("Failed to save trace: {}", e.getMessage(), e);
         }
         if (scenario.isFailed()) {
-            logger.error("Scenario FAILED: {}", scenario.getName());
-        } else {
+        logger.error("Scenario FAILED: {}", scenario.getName());
+        captureDomSnapshot(safeName);
+        }else {
             logger.info("Scenario PASSED: {}", scenario.getName());
         }
         
         PlaywrightFactory.quitBrowser();
         logger.info("==========================================================================");
+    }
+
+    private void captureDomSnapshot(String safeName) {
+        try {
+            Path dir = Paths.get("target/dom-snapshots");
+            if (Files.notExists(dir)) Files.createDirectories(dir);
+            String json = (String) PlaywrightFactory.getPage().evaluate(
+                "() => JSON.stringify(Array.from(document.querySelectorAll(" +
+                "'button,input,a,select,[role],[data-test],[data-testid],[onclick],[tabindex]'))" +
+                ".slice(0,100).map(e => ({tag:e.tagName, id:e.id, testId:e.dataset.test||e.dataset.testid, " +
+                "role:e.getAttribute('role'), aria:e.getAttribute('aria-label'), text:(e.innerText||'').slice(0,40)})))"
+            );
+            Files.writeString(dir.resolve(safeName + "-dom.json"), json);
+        } catch (Exception e) {
+            logger.warn("Failed to capture DOM snapshot: {}", e.getMessage());
+        }
     }
 
     private void clearPreviousRunArtifacts() {
