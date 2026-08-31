@@ -23,17 +23,18 @@ public class HealerOllamaClient {
     private static final String DEFAULT_BASE_URL = "http://localhost:11434";
 
     // Structured-output schema constraining Ollama's answer to exactly what LocatorHealer needs:
-    // the replacement locator statement, which candidate element it's based on, and how
-    // confident the model is. See https://docs.ollama.com/capabilities/structured-outputs.
+    // the replacement bare selector value (not a Java statement - see LocatorHealer's prompt),
+    // which candidate element it's based on, and how confident the model is. See
+    // https://docs.ollama.com/capabilities/structured-outputs.
     private static final String LOCATOR_RESPONSE_SCHEMA_JSON = """
             {
               "type": "object",
               "properties": {
-                "newLocatorCode": {"type": "string"},
+                "newSelector": {"type": "string"},
                 "matchedElement": {"type": "string"},
                 "confidence": {"type": "string", "enum": ["high", "low"]}
               },
-              "required": ["newLocatorCode", "matchedElement", "confidence"]
+              "required": ["newSelector", "matchedElement", "confidence"]
             }
             """;
 

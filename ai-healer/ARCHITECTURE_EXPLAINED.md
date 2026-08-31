@@ -6,8 +6,9 @@ temporarily broken from `#login-button` to `#login-button-BROKEN-TEMP` so we cou
 the whole pipeline handle a real failure.
 
 You don't need to be a Java expert to follow this. You just need to follow one webpage's
-worth of story: a test clicked a button that wasn't there, and now seven small classes work
-together to figure out what the *real* button was called.
+worth of story: a test clicked a button that wasn't there, and now eight small classes work
+together to figure out what the *real* button was called — and one of them now goes as far as
+actually rewriting the broken line in the source file.
 
 ## The story in one paragraph
 
@@ -20,14 +21,14 @@ locator would cause, and if so, ask a local AI model to look at the real page sn
 suggest what the locator *should* have been — using only elements that were genuinely on the
 page, never a guess.
 
-Seven classes divide that job up:
+Eight classes divide that job up:
 
 ```
-SurefireReportReader  →  FailureClassifier  →  LocatorHealer  →  HealerOllamaClient
-   (reads the XML)      (is this fixable?)   (builds the case)   (makes the phone call)
-        ↓                                           ↑
-   TestFailure  ────────────────────────────────────┘
-  (the case file passed between all three)
+SurefireReportReader → FailureClassifier → LocatorHealer → HealerOllamaClient
+   (reads the XML)     (is this fixable?)  (builds the case) (makes the phone call)
+        ↓                                        ↑    ↓
+   TestFailure ─────────────────────────────────-┘  HealResult → PageObjectPatcher
+  (the case file passed between all three)        (the suggestion)  (edits the file)
         ↑
 DomElement (one page element, many of these live inside the DOM snapshot)
 
@@ -206,7 +207,12 @@ aria = null
 text = ""
 ```
 The whole snapshot file — seven elements for our login page — becomes a list of seven of
-these.
+these. One thing worth flagging here so it doesn't cause confusion later: `testId` is this
+field's *Java name*, chosen to match the JSON key Hooks writes - it is not the name of a real
+HTML attribute. The actual attribute Hooks read the value from (`data-test`, falling back to
+`data-testid` - see `captureDomSnapshot` below) only shows up again when `LocatorHealer` builds
+its prompt, and getting that translation right turned out to matter a lot (see `LocatorHealer`'s
+Step 4 below).
 
 **Why it's its own class:** Its fields are named to match the JSON keys exactly
 (`tag`/`id`/`testId`/`role`/`aria`/`text`) *on purpose*, so the JSON-to-Java conversion is
@@ -233,8 +239,8 @@ variable (or `qwen2.5-coder:14b` if that variable isn't set), and hands back the
 Ollama replied with:
 ```
 {
-  "newLocatorCode": "page.locator('#login-button')",
-  "matchedElement": "tag=INPUT id=login-button testId=login-button",
+  "newSelector": "#login-button",
+  "matchedElement": "tag=INPUT id=login-button data-test/data-testid=login-button",
   "confidence": "high"
 }
 ```
@@ -275,42 +281,106 @@ of the module and it's exactly what we ran for real.
 belongs to a page object — not `BasePage.java:34` (every page object's `click()` and `type()`
 calls funnel through `BasePage`, so that line is the same for almost every locator failure in
 the whole suite and tells you nothing) but the concrete page object one frame after it:
-`LoginPage.java:29`, the actual line where `click(loginButton)` was called.
+`LoginPage.java:29`, the actual line where `click(loginButton)` was called. That's useful
+context for the prompt, but it's *not* where the fix needs to go — line 29 is where the
+locator is *used*, not where it's *declared*. So `LocatorHealer` takes it one step further:
+it opens `LoginPage.java` itself and searches for the one field line whose quoted value is
+exactly `#login-button-BROKEN-TEMP` — which turns out to be line 13, three lines above the
+constructor. That's the line `PageObjectPatcher` will actually be told to edit.
 
 *Step 4 — build the prompt.* The real user-facing prompt sent to Ollama was:
 ```
 BROKEN LOCATOR: #login-button-BROKEN-TEMP
 USED AT: LoginPage.java:29
 
+NOTE: Some candidate elements below share the same text, role, or aria value - marked
+[NOT UNIQUE]. A locator built from a [NOT UNIQUE] value could match more than one element
+on the real page. Prefer a candidate's id or data-test/data-testid value in that case; if
+only [NOT UNIQUE] properties match and no candidate has a unique id/data-test/data-testid,
+set confidence to "low" and say so in matchedElement.
+
 CANDIDATE ELEMENTS:
-1. tag=DIV testId=login-container text="Accepted usernames are:
+1. tag=DIV data-test/data-testid=login-container text="Accepted usernames are:
 standard_user
-lo"
-2. tag=INPUT id=user-name testId=username
-3. tag=INPUT id=password testId=password
-4. tag=INPUT id=login-button testId=login-button
-5. tag=DIV testId=login-credentials-container text="Accepted usernames are:
+lo" [NOT UNIQUE]
+2. tag=INPUT id=user-name data-test/data-testid=username
+3. tag=INPUT id=password data-test/data-testid=password
+4. tag=INPUT id=login-button data-test/data-testid=login-button
+5. tag=DIV data-test/data-testid=login-credentials-container text="Accepted usernames are:
 standard_user
-lo"
-6. tag=DIV id=login_credentials testId=login-credentials text="Accepted usernames are:
+lo" [NOT UNIQUE]
+6. tag=DIV id=login_credentials data-test/data-testid=login-credentials text="Accepted usernames are:
 standard_user
-lo"
-7. tag=DIV testId=login-password text="Password for all users:
+lo" [NOT UNIQUE]
+7. tag=DIV data-test/data-testid=login-password text="Password for all users:
 secret_sauce"
 ```
-alongside a fixed system prompt instructing the model to build its answer *only* from values
-that appear in that candidate list — never to invent an id or testId that isn't shown.
+alongside a fixed system prompt instructing the model to answer with a *bare selector value* -
+not a Java statement like `page.locator("#id")`, just the raw text a page object field would
+hold, e.g. `#id` or `[data-test='x']` - built *only* from values that appear in that candidate
+list, never an invented id or property. That instruction matters: this codebase's page object
+fields hold exactly that kind of bare string (`BasePage.click(selector)` passes it straight to
+`page.click(selector)`), so asking for anything else would produce a suggestion `PageObjectPatcher`
+could write into the file but that Playwright could never actually use - see the closing section
+below for what that looked like in practice before this was fixed. Notice the label itself:
+`DomElement`'s Java field is called `testId`, but the prompt never says "testId" - it says
+`data-test/data-testid`, the actual HTML attribute Hooks read the value from (see
+`captureDomSnapshot`: `e.dataset.test||e.dataset.testid`). A model told "testId=X" has no way to
+know that's not a real attribute name; a model told "data-test/data-testid=X" can build a
+selector that will actually match something on the real page. Three of these seven candidates
+(1, 5, and 6) happen to share the exact same visible text - "Accepted usernames are:
+standard_user..." - so all three are correctly marked `[NOT UNIQUE]`, and the NOTE above appears.
+
+*Step 4½ — spot ambiguous candidates before they cause a bad pick.* Before building the prompt,
+`LocatorHealer` checks whether any candidate's `text`, `role`, or `aria` value is shared by more
+than one candidate (id/data-test/data-testid aren't checked — they're treated as reliably unique
+per-element identifiers). SauceDemo's real inventory page is an even sharper example: every "Add
+to cart" button has the *same visible text* but a *different* `data-test` value per product. Two
+real Ollama calls with that exact shape, run for real to confirm this actually works and not
+just in theory:
+```
+CANDIDATE ELEMENTS (three "Add to cart" buttons, each with its own data-test value):
+1. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-backpack text="Add to cart" [NOT UNIQUE]
+2. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-bike-light text="Add to cart" [NOT UNIQUE]
+3. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-bolt-t-shirt text="Add to cart" [NOT UNIQUE]
+
+→ real response: newSelector = "[data-test='add-to-cart-sauce-labs-backpack']", confidence = "high"
+```
+The model correctly reached for the unique `data-test` value instead of the shared "Add to cart"
+text — a text-based locator here would have matched all three buttons, not just the one it
+meant — and, just as important, it wrote a *real* attribute selector this time. Earlier runs of
+this exact scenario (before the label was fixed) produced `[testId='add-to-cart-sauce-labs-backpack']`
+instead: it looked plausible in the transcript, but `testId` isn't an HTML attribute that exists
+on any real page, so that selector would have matched nothing. `[data-test='...']` is the actual
+convention this app's real page objects use (see `InventoryPage.addProductToCart`, which builds
+the identical `[data-test='add-to-cart-...']` shape by hand) - this selector would genuinely work.
+Take the data-test values away entirely, leaving only three identical text-only candidates with
+no id or data-test/data-testid anywhere:
+```
+CANDIDATE ELEMENTS (three plain divs, nothing but shared text):
+1. tag=DIV text="Add to cart" [NOT UNIQUE]
+2. tag=DIV text="Add to cart" [NOT UNIQUE]
+3. tag=DIV text="Add to cart" [NOT UNIQUE]
+
+→ real response: newSelector = "text='Add to cart'", confidence = "low"
+```
+With no unique property available at all, the model still answered (rather than refusing
+outright), but honestly flagged low confidence instead of pretending it knew which of the three
+identical elements was the right one.
 
 *Step 5 — hand that off to `HealerOllamaClient` and parse what comes back.* The real answer,
 shown under `HealerOllamaClient` above, becomes a `HealResult`:
 ```
-newLocatorCode = "page.locator('#login-button')"
-matchedElement = "tag=INPUT id=login-button testId=login-button"
+newSelector    = "#login-button"
+matchedElement = "tag=INPUT id=login-button data-test/data-testid=login-button"
 confidence     = "high"
+filePath       = ".../saucedemo/LoginPage.java"
+lineNumber     = 13
 ```
 Candidate #4 is genuinely the right element — it's what the locator pointed to before we
 broke it on purpose for this test — and the model picked it correctly, from real page data,
-inventing nothing.
+inventing nothing. `filePath`/`lineNumber` are the declaration line from Step 3, carried along
+so `PageObjectPatcher` has an actual place to make the edit — not just a suggestion in the abstract.
 
 **Why it's its own class:** This is the "case manager" — it's the only class that understands
 the *shape* of the whole problem (a broken locator, plus context, plus real candidates,
@@ -324,8 +394,77 @@ module recognizes the pattern in the other.
 
 ---
 
-## What's still missing
+## PageObjectPatcher
 
-Nothing in `ai-healer` writes to `LoginPage.java` yet. `LocatorHealer` produces a suggested
-fix and stops there — actually patching the source file, and deciding when a `"low"`
-confidence result is trustworthy enough to apply automatically, is later work.
+**The problem it solves:** `LocatorHealer` has produced a suggestion and a location, but
+nothing has touched the file yet. Something has to actually open `LoginPage.java`, change
+*exactly* the broken line, and leave every other byte in the file untouched — and, just as
+important, refuse to touch anything if the location it's been given doesn't look like a
+locator after all. This class is deliberately not smart: it doesn't decide whether the new
+locator is a *good* one, it just performs the edit, carefully.
+
+**In → out, with real values:** Given `filePath = LoginPage.java`, `lineNumber = 13`, and
+`newSelector = "#login-button"` from the real `HealResult` above, it first reads line 13 and
+checks it against the shape `private final String <name> = "...";` — it matches, so the edit
+goes ahead:
+```diff
+     private final String usernameInput = "#user-name";
+     private final String passwordInput = "#password";
+-    private final String loginButton = "#login-button-BROKEN-TEMP";
++    private final String loginButton = "#login-button";
+```
+Comparing the file byte-for-byte before and after confirms that line is the *only* thing that
+changed — same imports, same blank lines, same everything else. The result it hands back is
+`applied = true`, with a plain-English reason describing exactly what it replaced. In this real
+run, the patched line is byte-for-byte identical to what the field held *before* it was ever
+broken for this test - and re-running the actual test suite against the patched file confirms
+it: the login test passes again, for real, not just textually.
+
+Point it at a line that isn't a locator field — say, `public LoginPage(Page page) {` — and it
+refuses instead of guessing:
+```
+applied: false
+reason: Line 15 of LoginPage.java doesn't look like a locator field declaration
+        (expected 'private final String <name> = "...";'), found:
+        public LoginPage(Page page) {
+```
+The file is left completely untouched when that happens.
+
+**Why it's its own class:** Editing a source file is a fundamentally different *kind* of
+responsibility than deciding what to write into it — one is "does this text change preserve
+everything else," the other is "is this the right fix." Keeping them apart means
+`PageObjectPatcher` can be trusted never to corrupt a file (it has exactly one job, and a
+test-covered refusal path for every way its input could be wrong), while all of the judgment
+about *what* to suggest stays entirely in `LocatorHealer` and, eventually, whatever decides if
+a `"low"` confidence result is even worth applying automatically. That second piece
+(`HealOrchestrator`, wiring all of this together and deciding what to do with the result) is
+still unbuilt.
+
+---
+
+## A real problem this surfaced — since fixed
+
+Running the real case end-to-end first exposed something worth knowing the history of:
+`BasePage.click(selector)` calls Playwright's `page.click(selector)` directly, which means
+every page object field is a *bare selector string* — `"#login-button"`, not a Java expression.
+But `LocatorHealer`'s prompt originally asked Ollama for "one replacement Playwright Java
+locator statement," and the model reasonably answered with exactly that:
+`page.locator('#login-button')`. `PageObjectPatcher` did its job faithfully and inserted it
+verbatim, so the field ended up reading:
+```java
+private final String loginButton = "page.locator('#login-button')";
+```
+That's valid Java — it compiles — but it isn't a valid CSS selector, so the test would still
+fail, just with a more confusing error than before. `PageObjectPatcher` was never the right
+place to fix this: silently rewriting `page.locator('#login-button')` down to `#login-button`
+would be exactly the kind of "deciding what a good fix looks like" it's built not to do.
+
+The honest fix belonged upstream, and that's where it landed: `LocatorHealer`'s schema field was
+renamed from `newLocatorCode` to `newSelector`, and its prompt now explicitly asks for "a
+replacement bare selector value - not a Java statement," with examples in that shape
+(`"#id"`, `"[data-test='x']"`) instead of `page.locator("#id")`. Re-running the exact same real
+case end-to-end confirms it: Ollama now answers `newSelector = "#login-button"`, and
+`PageObjectPatcher` writes that bare value straight into the field - which happens to be
+byte-for-byte identical to what the field held before it was ever broken. Re-running the actual
+test suite against the patched file confirms the fix is real, not just textual: the login test
+passes.

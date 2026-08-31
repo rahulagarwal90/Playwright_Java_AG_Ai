@@ -7,15 +7,22 @@ import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * For a TestFailure already classified LOCATOR_FAILURE with a DOM snapshot on disk, asks Ollama
- * to suggest a replacement locator built only from elements that actually appear in that
+ * to suggest a replacement bare selector built only from elements that actually appear in that
  * snapshot. Orchestration only (extracting the broken locator, loading the snapshot, building the
  * prompt, parsing the answer) - the HTTP call itself is HealerOllamaClient's job, matching how
  * ai-reviewer splits OllamaReviewClient (HTTP) from LocalCodeReviewer (orchestration).
@@ -25,9 +32,20 @@ public class LocatorHealer {
     private static final Logger LOGGER = Logger.getLogger(LocatorHealer.class.getName());
 
     public static class HealResult {
-        public String newLocatorCode;
+        public String newSelector;
         public String matchedElement;
         public String confidence;
+        // Where the broken locator field actually lives, so PageObjectPatcher has something to
+        // act on. Null/0 when no page object stack frame could be identified (see
+        // extractPageObjectLocation) - the caller then has no patchable location, only a
+        // suggestion.
+        public Path filePath;
+        public int lineNumber;
+    }
+
+    // A resolved (source file, line number) pointing at a page object's locator field.
+    // Package-private (not private) so tests can exercise the resolution logic directly.
+    record PageObjectLocation(Path filePath, int lineNumber) {
     }
 
     private static final Pattern LOCATOR_IN_CALL_LOG =
@@ -35,10 +53,14 @@ public class LocatorHealer {
     // Every page object's locator calls go through BasePage's wrapper methods (click/type/...),
     // so that's always the first com.framework frame in the trace and never the actually useful
     // one - it's the same line for nearly every locator failure in the suite. The concrete page
-    // object frame right after it is where the locator field and its usage actually live.
+    // object frame right after it is where the locator field and its usage actually live. Group 1
+    // captures the fully qualified frame (package + class + method) so the source file's path can
+    // be derived from it, not just its bare filename.
     private static final Pattern PAGE_OBJECT_STACK_FRAME =
-            Pattern.compile("at com\\.framework\\.pages\\.(?!BasePage\\.)[\\w.$]+\\((\\w+\\.java):(\\d+)\\)");
-    // Fallback for a failure that never goes through a page object at all.
+            Pattern.compile("at (com\\.framework\\.pages\\.(?!BasePage\\.)[\\w.$]+)\\((\\w+\\.java):(\\d+)\\)");
+    // Fallback for a failure that never goes through a page object at all - used only for the
+    // human-readable prompt context, since a non-page-object frame doesn't reliably map to a
+    // src/main/java path the way a page object frame does.
     private static final Pattern PROJECT_STACK_FRAME =
             Pattern.compile("at com\\.framework\\.[\\w.$]+\\((\\w+\\.java):(\\d+)\\)");
 
@@ -48,16 +70,33 @@ public class LocatorHealer {
             string, optionally the file and line where it was used, and a list of real DOM \
             elements captured from the page at the moment of failure (CANDIDATE ELEMENTS).
 
-            Suggest ONE replacement Playwright Java locator statement (e.g. \
-            page.locator("#id"), page.getByTestId("..."), page.getByRole(...), \
-            page.getByText("...")) that targets one of the CANDIDATE ELEMENTS.
+            Suggest ONE replacement bare selector value - not a Java statement, just the raw \
+            selector text a page object would store in a field and later pass to \
+            page.click(selector)/page.locator(selector) (e.g. "#id", "[data-test='x']", \
+            ".some-class", "text=Some Text") - that targets one of the CANDIDATE ELEMENTS.
 
             Rules:
-            - You MUST base the replacement only on an id, testId, role, aria label, or text \
-            value that appears EXACTLY in the candidate list below. Never invent, guess, or \
-            slightly modify a value that isn't shown there.
-            - matchedElement must name which candidate element (by its listed id/testId/role/text) \
-            the suggestion is based on.
+            - You MUST base the replacement only on an id, data-test/data-testid attribute value, \
+            role, aria label, or text value that appears EXACTLY in the candidate list below. \
+            Never invent, guess, or slightly modify a value that isn't shown there.
+            - A candidate's data-test/data-testid value came from a real HTML attribute named \
+            EITHER data-test OR data-testid - never an attribute literally named "testId". If you \
+            build an attribute selector from it, use the real attribute name, e.g. \
+            [data-test='value'], NOT [testId='value'] (which does not exist on the real page and \
+            would match nothing).
+            - matchedElement must name which candidate element (by its listed id/data-test-or-\
+            data-testid/role/text) the suggestion is based on.
+            - Multiple elements may share the same property - the candidate list marks a value \
+            [NOT UNIQUE] whenever more than one candidate shares it. A locator built from a \
+            [NOT UNIQUE] text, role, or aria value could match more than one element on the real \
+            page, not just the one you intend. When that's the case, prefer a candidate's id or \
+            data-test/data-testid value instead, since those identify one specific element; note \
+            the ambiguity explicitly in matchedElement whenever you rely on or deliberately avoid \
+            a [NOT UNIQUE] property.
+            - If the only candidates matching the broken locator's intent share a [NOT UNIQUE] \
+            property and none of them has a unique id or data-test/data-testid value, set \
+            confidence to "low" and say so explicitly in matchedElement, rather than arbitrarily \
+            picking one of them.
             - If no candidate looks like a plausible replacement for the broken locator, still \
             return your best guess built only from listed values, and set confidence to "low". \
             Set confidence to "high" only when a candidate clearly corresponds to the broken \
@@ -88,7 +127,13 @@ public class LocatorHealer {
         String responseJson = ollamaClient.suggestLocator(SYSTEM_PROMPT, userPrompt);
         LOGGER.info("LocatorHealer raw Ollama response:\n" + responseJson);
 
-        return parseResult(responseJson);
+        HealResult result = parseResult(responseJson);
+        PageObjectLocation location = extractPageObjectLocation(failure.stackTrace, brokenLocator);
+        if (location != null) {
+            result.filePath = location.filePath();
+            result.lineNumber = location.lineNumber();
+        }
+        return result;
     }
 
     private static String extractBrokenLocator(TestFailure failure) {
@@ -107,10 +152,71 @@ public class LocatorHealer {
         }
         Matcher pageObjectMatcher = PAGE_OBJECT_STACK_FRAME.matcher(stackTrace);
         if (pageObjectMatcher.find()) {
-            return pageObjectMatcher.group(1) + ":" + pageObjectMatcher.group(2);
+            return pageObjectMatcher.group(2) + ":" + pageObjectMatcher.group(3);
         }
         Matcher matcher = PROJECT_STACK_FRAME.matcher(stackTrace);
         return matcher.find() ? matcher.group(1) + ":" + matcher.group(2) : null;
+    }
+
+    // Matches a page object's locator field declaration, capturing the string literal's exact
+    // content so it can be compared against the broken locator value.
+    private static final Pattern LOCATOR_FIELD_DECLARATION =
+            Pattern.compile("^\\s*private\\s+final\\s+String\\s+\\w+\\s*=\\s*\"([^\"]*)\"\\s*;\\s*$");
+
+    // Resolves the concrete page object frame in a stack trace into an actual source file path
+    // and line number, so PageObjectPatcher has a real location to act on. Deliberately narrower
+    // than extractFileLineContext (used only for the prompt): a frame outside com.framework.pages
+    // could live under src/test/java instead of src/main/java (steps, hooks, ...), so there's no
+    // reliable way to turn it into a resolvable path - null is the honest answer there.
+    //
+    // The stack frame only points at the *call site* (e.g. "click(loginButton);"), not the field
+    // *declaration* - those are different lines. Once the file is located, this searches it for
+    // the one "private final String X = "...";" line whose literal value is exactly the broken
+    // locator string, and reports that line instead. Falling back to the call-site line if no
+    // such declaration is found is a safe failure mode: PageObjectPatcher will simply refuse to
+    // patch a line that isn't a locator declaration, exactly as it should.
+    private static PageObjectLocation extractPageObjectLocation(String stackTrace, String brokenLocator) {
+        return extractPageObjectLocation(stackTrace, brokenLocator, RepoRoot.resolve(LocatorHealer.class));
+    }
+
+    // Package-private overload so tests can point resolution at a temp directory instead of the
+    // real repo root, without depending on whatever this repo's real page objects currently hold.
+    static PageObjectLocation extractPageObjectLocation(String stackTrace, String brokenLocator, Path repoRoot) {
+        if (stackTrace == null) {
+            return null;
+        }
+        Matcher matcher = PAGE_OBJECT_STACK_FRAME.matcher(stackTrace);
+        if (!matcher.find()) {
+            return null;
+        }
+
+        String qualifiedFrame = matcher.group(1); // e.g. com.framework.pages.saucedemo.LoginPage.loginWithConfigCredentials
+        String fileName = matcher.group(2); // e.g. LoginPage.java
+        int callSiteLine = Integer.parseInt(matcher.group(3));
+
+        // Drop the method name and the simple class name, keep the package.
+        String[] parts = qualifiedFrame.split("\\.");
+        String packagePath = String.join("/", Arrays.copyOf(parts, parts.length - 2));
+
+        Path filePath = repoRoot.resolve("playwright-tests/src/main/java").resolve(packagePath).resolve(fileName);
+
+        int declarationLine = findLocatorDeclarationLine(filePath, brokenLocator);
+        return new PageObjectLocation(filePath, declarationLine > 0 ? declarationLine : callSiteLine);
+    }
+
+    private static int findLocatorDeclarationLine(Path filePath, String brokenLocator) {
+        try {
+            List<String> lines = Files.readAllLines(filePath, StandardCharsets.UTF_8);
+            for (int i = 0; i < lines.size(); i++) {
+                Matcher fieldMatcher = LOCATOR_FIELD_DECLARATION.matcher(lines.get(i));
+                if (fieldMatcher.matches() && fieldMatcher.group(1).equals(brokenLocator)) {
+                    return i + 1;
+                }
+            }
+        } catch (IOException e) {
+            // Fall through - the caller falls back to the call-site line.
+        }
+        return -1;
     }
 
     private List<DomElement> loadDomSnapshot(TestFailure failure) throws IOException {
@@ -126,11 +232,54 @@ public class LocatorHealer {
         if (fileLineContext != null) {
             prompt.append("USED AT: ").append(fileLineContext).append("\n");
         }
-        prompt.append("\nCANDIDATE ELEMENTS:\n").append(formatCandidates(candidates));
+
+        // id/data-test(id) are treated as reliably unique per-element identifiers by convention in
+        // this codebase, so only the free-text-ish properties (text/role/aria) are checked here -
+        // two buttons can easily share the same visible text ("Add to cart") while having distinct
+        // data-test values, and that's exactly the case a locator built from text alone would get
+        // wrong.
+        Set<String> duplicateTexts = findDuplicateValues(candidates, element -> element.text);
+        Set<String> duplicateRoles = findDuplicateValues(candidates, element -> element.role);
+        Set<String> duplicateArias = findDuplicateValues(candidates, element -> element.aria);
+        boolean hasAmbiguousCandidates =
+                !duplicateTexts.isEmpty() || !duplicateRoles.isEmpty() || !duplicateArias.isEmpty();
+
+        if (hasAmbiguousCandidates) {
+            prompt.append("\nNOTE: Some candidate elements below share the same text, role, or ")
+                    .append("aria value - marked [NOT UNIQUE]. A locator built from a [NOT UNIQUE] ")
+                    .append("value could match more than one element on the real page. Prefer a ")
+                    .append("candidate's id or data-test/data-testid value in that case; if only ")
+                    .append("[NOT UNIQUE] properties match and no candidate has a unique ")
+                    .append("id/data-test/data-testid, set confidence to \"low\" and say so in ")
+                    .append("matchedElement.\n");
+        }
+
+        prompt.append("\nCANDIDATE ELEMENTS:\n")
+                .append(formatCandidates(candidates, duplicateTexts, duplicateRoles, duplicateArias));
         return prompt.toString();
     }
 
-    private static String formatCandidates(List<DomElement> candidates) {
+    // Returns every non-blank value that accessor pulls out of more than one candidate - e.g. two
+    // "Add to cart" buttons for different products would both surface "Add to cart" here.
+    private static Set<String> findDuplicateValues(List<DomElement> candidates, Function<DomElement, String> accessor) {
+        Map<String, Integer> counts = new HashMap<>();
+        for (DomElement element : candidates) {
+            String value = accessor.apply(element);
+            if (notBlank(value)) {
+                counts.merge(value, 1, Integer::sum);
+            }
+        }
+        Set<String> duplicates = new HashSet<>();
+        for (Map.Entry<String, Integer> entry : counts.entrySet()) {
+            if (entry.getValue() > 1) {
+                duplicates.add(entry.getKey());
+            }
+        }
+        return duplicates;
+    }
+
+    private static String formatCandidates(List<DomElement> candidates, Set<String> duplicateTexts,
+            Set<String> duplicateRoles, Set<String> duplicateArias) {
         StringBuilder sb = new StringBuilder();
         int index = 1;
         for (DomElement element : candidates) {
@@ -142,16 +291,20 @@ public class LocatorHealer {
                 parts.add("id=" + element.id);
             }
             if (notBlank(element.testId)) {
-                parts.add("testId=" + element.testId);
+                // DomElement.testId (see Hooks.captureDomSnapshot) is populated from an element's
+                // real data-test attribute, falling back to data-testid - never a "testId"
+                // attribute, which doesn't exist on any real page. Label it as what it actually
+                // is so the model builds a selector against a real attribute, not an invented one.
+                parts.add("data-test/data-testid=" + element.testId);
             }
             if (notBlank(element.role)) {
-                parts.add("role=" + element.role);
+                parts.add("role=" + element.role + (duplicateRoles.contains(element.role) ? " [NOT UNIQUE]" : ""));
             }
             if (notBlank(element.aria)) {
-                parts.add("aria=" + element.aria);
+                parts.add("aria=" + element.aria + (duplicateArias.contains(element.aria) ? " [NOT UNIQUE]" : ""));
             }
             if (notBlank(element.text)) {
-                parts.add("text=\"" + element.text + "\"");
+                parts.add("text=\"" + element.text + "\"" + (duplicateTexts.contains(element.text) ? " [NOT UNIQUE]" : ""));
             }
             sb.append(index++).append(". ").append(String.join(" ", parts)).append("\n");
         }
@@ -167,7 +320,7 @@ public class LocatorHealer {
     private HealResult parseResult(String json) {
         JsonObject obj = gson.fromJson(json, JsonObject.class);
         HealResult result = new HealResult();
-        result.newLocatorCode = jsonFieldAsString(obj, "newLocatorCode");
+        result.newSelector = jsonFieldAsString(obj, "newSelector");
         result.matchedElement = jsonFieldAsString(obj, "matchedElement");
         result.confidence = jsonFieldAsString(obj, "confidence");
         return result;

@@ -27,7 +27,7 @@ public class SurefireReportReader {
     private final Path domSnapshotsDir;
 
     public SurefireReportReader() {
-        Path repoRoot = findRepoRoot();
+        Path repoRoot = RepoRoot.resolve(SurefireReportReader.class);
         this.surefireReportsDir = repoRoot.resolve("playwright-tests/target/surefire-reports");
         this.domSnapshotsDir = repoRoot.resolve("playwright-tests/target/dom-snapshots");
     }
@@ -105,27 +105,5 @@ public class SurefireReportReader {
         factory.setXIncludeAware(false);
         factory.setExpandEntityReferences(false);
         return factory.newDocumentBuilder();
-    }
-
-    // Locates the repo root by walking up from wherever this class was loaded from until a
-    // directory containing both sibling modules is found, so this works regardless of the JVM's
-    // working directory (mirrors ai-reviewer's ModuleRoot, kept self-contained here since
-    // ai-healer has no dependency on the ai-reviewer module).
-    private static Path findRepoRoot() {
-        try {
-            Path codeSource = Path.of(
-                    SurefireReportReader.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-            Path candidate = Files.isDirectory(codeSource) ? codeSource : codeSource.getParent();
-            while (candidate != null) {
-                if (Files.isDirectory(candidate.resolve("playwright-tests"))
-                        && Files.isDirectory(candidate.resolve("ai-reviewer"))) {
-                    return candidate;
-                }
-                candidate = candidate.getParent();
-            }
-        } catch (Exception e) {
-            // Fall through to the working-directory fallback below.
-        }
-        return Path.of("").toAbsolutePath();
     }
 }
