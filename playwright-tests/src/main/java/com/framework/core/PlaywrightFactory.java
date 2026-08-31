@@ -39,7 +39,11 @@ public class PlaywrightFactory {
             logger.info("Playwright video recording disabled via configuration.");
         }
         tlContext.set(tlBrowser.get().newContext(contextOptions));
-        
+
+        int timeoutMs = config.playwrightTimeout();
+        tlContext.get().setDefaultTimeout(timeoutMs);
+        logger.info("Playwright default action/navigation timeout: {}ms", timeoutMs);
+
         tlPage.set(tlContext.get().newPage());
         logger.info("Browser/Page session initialized.");
     }

@@ -38,4 +38,10 @@ public interface FrameworkConfig extends Config {
     @Key("browser.recordvideo")
     @DefaultValue("true")
     boolean browserRecordVideo();
+
+    // Default Playwright action/navigation timeout (ms), applied to the whole BrowserContext in
+    // PlaywrightFactory. Playwright's own built-in default is 30000ms.
+    @Key("playwright.timeout")
+    @DefaultValue("10000")
+    int playwrightTimeout();
 }
