@@ -49,6 +49,36 @@ public class FailureClassifierTest {
             + "Locator.expect with timeout 5000ms\n"
             + "waiting for locator(\"ummary_subtotal_label\")\n";
 
+    // Captured verbatim (stack frames trimmed) from a real run with CheckoutStepOnePage's
+    // lastNameInput field broken to "[data-test'lastName']" (missing "="). type(lastNameInput,
+    // ...) throws com.microsoft.playwright.PlaywrightException - the browser's own
+    // querySelectorAll rejects the selector as a DOMException, relayed back through Playwright.
+    // Note the DOMException's own echoed-back selector text has its quotes swapped
+    // ('[data-test"lastName"]', not the original '[data-test\'lastName\']') - the call log's
+    // "waiting for locator(...)" line is the reliable source for the real, original text.
+    private static final String REAL_MALFORMED_SELECTOR_DOM_EXCEPTION_MESSAGE =
+            "Error {\n"
+            + "  message='DOMException: Failed to execute 'querySelectorAll' on 'Document': "
+            + "'[data-test\"lastName\"]' is not a valid selector.\n"
+            + "    at query (<anonymous>:3352:41)\n"
+            + "}\n"
+            + "Call log:\n"
+            + "- waiting for locator(\"[data-test'lastName']\")\n";
+
+    // Captured verbatim (stack frames trimmed) from a real run with CheckoutStepOnePage's
+    // continueButton field broken to "[data-test=continue']" (unterminated quote). This time
+    // Playwright's own CSS parser rejects the selector before it's ever sent to the browser - a
+    // different message wording ("Unexpected token ... while parsing selector ...") and,
+    // critically, a call log with no "locator(...)" wrapper at all: just the bare selector text
+    // after "waiting for ".
+    private static final String REAL_MALFORMED_SELECTOR_PARSE_ERROR_MESSAGE =
+            "Error {\n"
+            + "  message='Unexpected token \"\" while parsing selector \"[data-test=continue']\"\n"
+            + "    at unexpected (.../cssParser.js:68:12)\n"
+            + "}\n"
+            + "Call log:\n"
+            + "- waiting for [data-test=continue']\n";
+
     @Test
     void realLocatorTimeoutClassifiesAsLocatorFailure() {
         TestFailure failure = failureOf("com.microsoft.playwright.TimeoutError", REAL_LOCATOR_NOT_FOUND_MESSAGE);
@@ -141,6 +171,37 @@ public class FailureClassifierTest {
                 + "Call log:\n"
                 + "  - navigating to \"https://www.saucedemo.com\", waiting until \"load\"\n";
         TestFailure failure = failureOf("com.microsoft.playwright.TimeoutError", message);
+
+        assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void realMalformedSelectorDomExceptionClassifiesAsLocatorFailure() {
+        TestFailure failure = failureOf("com.microsoft.playwright.PlaywrightException",
+                REAL_MALFORMED_SELECTOR_DOM_EXCEPTION_MESSAGE);
+
+        assertEquals(Classification.LOCATOR_FAILURE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void realMalformedSelectorParseErrorClassifiesAsLocatorFailure() {
+        // No "waiting for locator(...)" call log at all in this real case - the third pattern
+        // must not depend on that gate the way the other two do.
+        TestFailure failure = failureOf("com.microsoft.playwright.PlaywrightException",
+                REAL_MALFORMED_SELECTOR_PARSE_ERROR_MESSAGE);
+
+        assertEquals(Classification.LOCATOR_FAILURE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void otherPlaywrightExceptionClassifiesAsNotFixable() {
+        // A PlaywrightException that isn't about invalid selector syntax - e.g. a browser/network
+        // failure - must stay NOT_FIXABLE. Deliberately conservative: matching on the exception
+        // type alone would be far too broad.
+        String message = "Error {\n"
+                + "  message='net::ERR_CONNECTION_REFUSED at https://www.saucedemo.com/\n"
+                + "}\n";
+        TestFailure failure = failureOf("com.microsoft.playwright.PlaywrightException", message);
 
         assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
     }

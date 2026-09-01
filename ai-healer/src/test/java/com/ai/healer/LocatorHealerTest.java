@@ -202,6 +202,69 @@ public class LocatorHealerTest {
     }
 
     @Test
+    void extractsSelectorWithNoLocatorWrapperInCallLog(@TempDir Path tempDir) throws Exception {
+        // Real broken locator captured from CheckoutStepOnePage.continueButton:
+        // "[data-test=continue']" (unterminated quote) - Playwright's own CSS parser rejects it
+        // before it can build a locator descriptor, so the call log has no "locator(...)"
+        // wrapper at all, just "waiting for <selector>". The standard LOCATOR_IN_CALL_LOG regex
+        // can't match this shape; extraction must fall back to the unwrapped pattern.
+        Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
+        Files.writeString(snapshotPath, SNAPSHOT_JSON);
+
+        TestFailure failure = new TestFailure();
+        failure.testName = "Some Scenario";
+        failure.failureMessage = "Error {\n"
+                + "  message='Unexpected token \"\" while parsing selector \"[data-test=continue']\"\n"
+                + "}\n"
+                + "Call log:\n"
+                + "- waiting for [data-test=continue']\n";
+        failure.domSnapshotPath = snapshotPath;
+        failure.domSnapshotFound = true;
+
+        HealerOllamaClient mockClient = mock(HealerOllamaClient.class);
+        when(mockClient.suggestLocator(anyString(), anyString()))
+                .thenReturn("{\"newSelector\":\"#login-button\","
+                        + "\"matchedElement\":\"id=login-button\",\"confidence\":\"high\"}");
+
+        LocatorHealer healer = new LocatorHealer(mockClient);
+        LocatorHealer.HealResult result = healer.heal(failure);
+
+        assertEquals("[data-test=continue']", result.brokenLocator);
+    }
+
+    @Test
+    void systemPromptPrefersDataTestOverIdWhenBothPresent(@TempDir Path tempDir) throws Exception {
+        // Fix 1: this codebase's established convention (InventoryPage.addProductToCart()
+        // builds a [data-test='...'] selector by hand) should be reflected as an explicit rule
+        // in the prompt, not left to the model's free choice - a real prior run produced
+        // "#checkout" instead of the preferred "[data-test='checkout']" for a candidate that had
+        // both attributes.
+        Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
+        Files.writeString(snapshotPath, SNAPSHOT_JSON);
+
+        TestFailure failure = new TestFailure();
+        failure.testName = "Some Scenario";
+        failure.failureMessage = "Call log:\n- waiting for locator(\"#login-button-BROKEN-TEMP\")\n";
+        failure.domSnapshotPath = snapshotPath;
+        failure.domSnapshotFound = true;
+
+        HealerOllamaClient mockClient = mock(HealerOllamaClient.class);
+        when(mockClient.suggestLocator(anyString(), anyString()))
+                .thenReturn("{\"newSelector\":\"#login-button\","
+                        + "\"matchedElement\":\"id=login-button\",\"confidence\":\"high\"}");
+
+        LocatorHealer healer = new LocatorHealer(mockClient);
+        healer.heal(failure);
+
+        ArgumentCaptor<String> systemPromptCaptor = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(mockClient).suggestLocator(systemPromptCaptor.capture(), any());
+        String systemPrompt = systemPromptCaptor.getValue();
+
+        assertTrue(systemPrompt.contains("data-test") && systemPrompt.toLowerCase().contains("prefer"),
+                "expected the system prompt to instruct a data-test/data-testid preference over id; was:\n" + systemPrompt);
+    }
+
+    @Test
     void throwsWhenNoDomSnapshotFound() {
         TestFailure failure = new TestFailure();
         failure.testName = "Some Scenario";

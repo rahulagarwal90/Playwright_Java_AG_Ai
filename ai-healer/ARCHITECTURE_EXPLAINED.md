@@ -198,12 +198,44 @@ happens to be `AssertionFailedError`. A second real locator, `CheckoutStepTwoPag
 different page object. Both now classify `LOCATOR_FAILURE` and heal correctly - see
 `LocatorHealer` below for what that healing actually produced.
 
+A fifth case, also found chasing a real chain of pre-existing typos rather than invented:
+`CheckoutStepOnePage.lastNameInput`, typo'd to `"[data-test'lastName']"` (missing `=`), doesn't
+time out at all - `type(lastNameInput, ...)` throws `com.microsoft.playwright.PlaywrightException`
+*synchronously*, because the selector string itself can't be resolved to real elements: the
+browser's own `querySelectorAll` rejects it as a `DOMException`
+(`"...'[data-test\"lastName\"]' is not a valid selector."` - note the DOMException's own
+echoed-back text has its quotes swapped from the original; the call log's
+`waiting for locator("[data-test'lastName']")` line is the reliable source for the real,
+original text), relayed back through Playwright. `FailureClassifier` originally had no pattern
+for this at all, so it classified `NOT_FIXABLE`. A second real locator down the same chain,
+`CheckoutStepOnePage.continueButton` (typo'd to `"[data-test=continue']"`, an unterminated
+quote), turned out to fail a *different* way: Playwright's own CSS parser rejects it before the
+selector is ever sent to the browser (`"Unexpected token \"\" while parsing selector
+\"[data-test=continue']\""`), and critically, its call log has **no `locator(...)` wrapper at
+all** - just the bare `"- waiting for [data-test=continue']"`, since Playwright never got far
+enough to build a proper locator descriptor for a selector it couldn't parse. Fixed by adding a
+third, independent pattern: `PlaywrightException` whose message contains either
+`"is not a valid selector"` or `"while parsing selector"` classifies `LOCATOR_FAILURE`
+unconditionally - this pattern deliberately skips the "waiting for locator" / "resolved to"
+checks the other two patterns share, since a parse-time failure never produces either. Both real
+sub-shapes now classify `LOCATOR_FAILURE` and heal correctly - see `LocatorHealer` below for the
+matching extraction-regex fallback the second sub-shape needed. Two more real locators from the
+same chain deliberately do **not** match this or any pattern, on purpose: `zipcodeInput`
+(`"[data-test=postalCode]"`, unquoted) turned out not to be broken at all - an unquoted CSS
+attribute value is functionally identical to a quoted one, confirmed by a clean, all-passing run
+with it in that state - and `CheckoutCompletePage.completeHeader` (`".completeheader"`, missing
+a hyphen) is syntactically *valid* CSS that simply matches nothing, asserted via `.hasText()`
+rather than `.isVisible()`, so its real `AssertionFailedError` message reads `"Locator expected
+to have text: ..."` - a wording pattern 2 deliberately doesn't recognize. That one stays
+`NOT_FIXABLE`, correctly and on purpose, for now - see the "still-open gap" note in the
+`HealOrchestrator` section below.
+
 **Why it's its own class:** This logic needs to stay boring and predictable on purpose — it's
 plain string matching with no AI involved, so the same failure always gets the same verdict,
-and a human can read the three `if` checks and know exactly why something was or wasn't
-classified as fixable. Merging this into `LocatorHealer` would mean every future change to
-"how do we build the AI prompt" risks also silently changing "what counts as fixable" — two
-very different kinds of edits that should never accidentally affect each other.
+and a human can read the `if` checks and know exactly why something was or wasn't classified as
+fixable. Merging this into `LocatorHealer` would mean every future change to "how do we build
+the AI prompt" risks also silently changing "what counts as fixable" — two very different kinds
+of edits that should never accidentally affect each other.
 
 ---
 
@@ -403,6 +435,26 @@ Candidate #4 is genuinely the right element — it's what the locator pointed to
 broke it on purpose for this test — and the model picked it correctly, from real page data,
 inventing nothing. `filePath`/`lineNumber` are the declaration line from Step 3, carried along
 so `PageObjectPatcher` has an actual place to make the edit — not just a suggestion in the abstract.
+
+*A note on that `#login-button` answer above*: it predates a later fix and would likely come out
+differently today. Candidate #4 has **both** `id=login-button` and `data-test/data-testid=login-button`
+— and the prompt used to leave the choice between them entirely up to the model. A real later run
+with a different broken locator (`CartPage.checkoutButton`) surfaced the problem this caused: given
+a candidate with both attributes, the model answered `#checkout`, not this codebase's actual
+convention, `[data-test='checkout']` (see `InventoryPage.addProductToCart()`, which builds that
+exact shape by hand). Fixed with one more rule added to the prompt: prefer `data-test`/`data-testid`
+over `id` whenever a candidate has both, falling back to `id` only when a candidate has no
+`data-test`/`data-testid` value at all. **Confirmed for real across three separate Ollama calls**
+in one later chain-healing run, each with a candidate carrying both attributes:
+```
+lastNameInput's candidate:  id=last-name  data-test/data-testid=lastName
+  → newSelector = "[data-test='lastName']"   (not "#last-name")
+continueButton's candidate: id=continue    data-test/data-testid=continue
+  → newSelector = "[data-test='continue']"   (not "#continue")
+finishButton's candidate:   id=finish      data-test/data-testid=finish
+  → newSelector = "[data-test='finish']"     (not "#finish")
+```
+All three chose the `data-test`-based selector, never the `id`-based one — the fix holds.
 
 **Why it's its own class:** This is the "case manager" — it's the only class that understands
 the *shape* of the whole problem (a broken locator, plus context, plus real candidates,
@@ -647,27 +699,40 @@ invocation now extracts the full `[datatest='checkout']`, not the truncated `[da
 heals it to `#checkout` - `[PROGRESS] "Standard Customer Complete Purchase Flow" -
 CartPage.java:11 "[datatest='checkout']" -> "#checkout" kept`.
 
-**Chasing the rest of the checkout flow's chain exposed a second, different, still-open gap -
-not a `maxRetries` problem.** Beyond `checkoutButton`, the same scenario has several more real
-pre-existing typos further down, masked by Cucumber's fail-fast until each one ahead of it is
-fixed: `CheckoutStepOnePage.lastNameInput` (`"[data-test'lastName']"`, missing `=`),
-`zipcodeInput`, `continueButton`, and `CheckoutCompletePage.completeHeader`. The natural
-expectation was that running `TestRunAndHeal` a few more times (`ai.healer.maxRetries` defaults
-to `2`, a global budget per invocation) would work through them one or two at a time. That's not
-what happened: after healing `checkoutButton`, the very next unmasked failure -
-`lastNameInput` - throws a raw `com.microsoft.playwright.PlaywrightException`/`DOMException`
-(genuinely invalid CSS attribute-selector syntax, no `=` before the value), not a `TimeoutError`
-or a visibility `AssertionFailedError`. `FailureClassifier` correctly - by its existing, narrow
-design - classifies that `NOT_FIXABLE`, so `HealOrchestrator` stops there. Running `TestRunAndHeal`
-again reproduces the identical `NOT_FIXABLE` result with zero further progress, confirmed for
-real twice in a row - `ai.healer.maxRetries` was never the limiting factor; only one heal
-attempt (`checkoutButton`) was ever needed before hitting a failure shape `FailureClassifier`
-doesn't recognize at all. This is the same underlying shape as `CheckoutStepTwoPage`'s
-already-known `finishButton` bug (`"[data-tes'finish']"`) from earlier in this document - a
-syntactically invalid selector fails differently (and faster - synchronously, no waiting) than a
-syntactically valid-but-wrong one. Extending `FailureClassifier` with a third pattern for this
-shape, plus a locator-extraction path that doesn't depend on a `waiting for locator(...)`
-call-log line (a syntax error never produces one), is real future work - not attempted here.
+**Chasing the rest of the checkout flow's chain exposed a gap - since fixed - and then a second,
+genuinely different one that's still open.** Beyond `checkoutButton`, the same scenario has
+several more real pre-existing typos further down, masked by Cucumber's fail-fast until each one
+ahead of it is fixed: `CheckoutStepOnePage.lastNameInput` (`"[data-test'lastName']"`, missing
+`=`), `zipcodeInput`, `continueButton` (`"[data-test=continue']"`, unterminated quote),
+`CheckoutStepTwoPage.finishButton` (`"[data-tes'finish']"`, missing `t=`), and
+`CheckoutCompletePage.completeHeader` (`".completeheader"`, missing a hyphen). The first time
+this chain was chased, it stopped dead at `lastNameInput`: a raw
+`com.microsoft.playwright.PlaywrightException` (not a `TimeoutError` or a visibility
+`AssertionFailedError`) that `FailureClassifier` had no pattern for at all, so it classified
+`NOT_FIXABLE` and re-running `TestRunAndHeal` made zero further progress, confirmed for real
+twice in a row.
+
+**The fix**: a third, independent `FailureClassifier` pattern for `PlaywrightException` whose
+message contains `"is not a valid selector"` or `"while parsing selector"` - see the
+`FailureClassifier` section above for the two distinct real message/call-log shapes behind those
+two substrings, and `LocatorHealer` above for the matching extraction-regex fallback the second
+shape needed (its call log has no `locator(...)` wrapper at all - the original guess that *no*
+syntax-error call log would have one turned out to be only half right). **Confirmed for real**:
+re-chasing the same chain, `TestRunAndHeal` healed `lastNameInput` and `continueButton` in one
+invocation (`ai.healer.maxRetries`'s default of `2` accounting for stopping there, not a gap),
+then `finishButton` in a second invocation - all three correctly, `id`-vs-`data-test` fix and
+all. `zipcodeInput` was never actually broken (an unquoted CSS attribute value is functionally
+identical to a quoted one - confirmed by a clean, all-passing run with it in that state).
+
+**`completeHeader` is where the chain genuinely stops now, and correctly so.** It's syntactically
+*valid* CSS that just matches nothing - the same underlying "locator never resolves" problem as
+pattern 2 - but it's asserted via `assertThat(locator).hasText(...)` rather than `.isVisible()`,
+so its real `AssertionFailedError` message reads `"Locator expected to have text: Thank you for
+your order!\nReceived: null"`, not "expected to be visible." Pattern 2's wording check is
+deliberately narrow and doesn't match that, so this stays `NOT_FIXABLE` - a real, still-open gap
+(a fourth pattern generalizing "web-first assertion timeout" across whichever assertion method
+Playwright names, not just `.isVisible()`), left unfixed and out of scope for the task that found
+it.
 
 ---
 

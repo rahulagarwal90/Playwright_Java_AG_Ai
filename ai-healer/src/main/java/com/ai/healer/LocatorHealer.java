@@ -67,6 +67,15 @@ public class LocatorHealer {
     // "[datatest=" truncated at the embedded '.
     private static final Pattern LOCATOR_IN_CALL_LOG =
             Pattern.compile("waiting for locator\\(([\"'])(.+)\\1\\)");
+    // Fallback for a syntactically invalid selector that Playwright's own CSS parser rejects
+    // before it can even build a locator descriptor for it - the call log then has no
+    // locator(...) wrapper at all, just "waiting for <raw selector text>" for the rest of the
+    // line. Confirmed against a real broken CheckoutStepOnePage.continueButton =
+    // "[data-test=continue']" (unterminated quote): the call log line reads
+    // "- waiting for [data-test=continue']", not "waiting for locator(...)". The negative
+    // lookahead keeps this from ever firing on the standard, already-handled shape above.
+    private static final Pattern UNPARSEABLE_LOCATOR_IN_CALL_LOG =
+            Pattern.compile("waiting for (?!locator\\()(\\S[^\\r\\n]*)");
     // Every page object's locator calls go through BasePage's wrapper methods (click/type/...),
     // so that's always the first com.framework frame in the trace and never the actually useful
     // one - it's the same line for nearly every locator failure in the suite. The concrete page
@@ -96,6 +105,11 @@ public class LocatorHealer {
             - You MUST base the replacement only on an id, data-test/data-testid attribute value, \
             role, aria label, or text value that appears EXACTLY in the candidate list below. \
             Never invent, guess, or slightly modify a value that isn't shown there.
+            - When a candidate has BOTH an id and a data-test/data-testid value, prefer a selector \
+            built from data-test/data-testid over one built from id - that is this codebase's \
+            established convention (e.g. InventoryPage.addProductToCart() builds \
+            "[data-test='add-to-cart-...']" by hand, never an id-based selector). Only fall back \
+            to an id-based selector when the candidate has no data-test/data-testid value at all.
             - A candidate's data-test/data-testid value came from a real HTML attribute named \
             EITHER data-test OR data-testid - never an attribute literally named "testId". If you \
             build an attribute selector from it, use the real attribute name, e.g. \
@@ -170,7 +184,11 @@ public class LocatorHealer {
     static String tryExtractBrokenLocator(TestFailure failure) {
         String message = failure.failureMessage == null ? "" : failure.failureMessage;
         Matcher matcher = LOCATOR_IN_CALL_LOG.matcher(message);
-        return matcher.find() ? matcher.group(2) : null;
+        if (matcher.find()) {
+            return matcher.group(2);
+        }
+        Matcher fallbackMatcher = UNPARSEABLE_LOCATOR_IN_CALL_LOG.matcher(message);
+        return fallbackMatcher.find() ? fallbackMatcher.group(1).trim() : null;
     }
 
     private static String extractFileLineContext(String stackTrace) {
