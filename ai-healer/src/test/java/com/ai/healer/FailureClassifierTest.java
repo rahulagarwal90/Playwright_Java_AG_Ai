@@ -29,6 +29,26 @@ public class FailureClassifierTest {
             "TEMP: deliberate assertion failure for FailureClassifier testing "
             + "==> expected: <wrong-expected-value> but was: <actual-value>";
 
+    // Captured verbatim from a real run with InventoryPage's inventoryContainer field broken to
+    // "#nventory_container" (typo). assertThat(page.locator(inventoryContainer).first()).isVisible()
+    // times out through Playwright's web-first assertion API, not a raw click()/fill() - a
+    // completely different exception type (AssertionFailedError, not TimeoutError) for the exact
+    // same underlying problem: the locator never resolves.
+    private static final String REAL_VISIBILITY_ASSERTION_NOT_FOUND_MESSAGE =
+            "Locator expected to be visible\n"
+            + "Call log:\n"
+            + "Locator.expect with timeout 5000ms\n"
+            + "waiting for locator(\"#nventory_container\").first()\n";
+
+    // Captured verbatim from a real run with CheckoutStepTwoPage's itemTotalLabel field broken to
+    // "ummary_subtotal_label" (typo, missing leading "s" and the "." CSS prefix). Same shape as
+    // above, from a different page object and a different call site.
+    private static final String REAL_VISIBILITY_ASSERTION_NOT_FOUND_MESSAGE_2 =
+            "Locator expected to be visible\n"
+            + "Call log:\n"
+            + "Locator.expect with timeout 5000ms\n"
+            + "waiting for locator(\"ummary_subtotal_label\")\n";
+
     @Test
     void realLocatorTimeoutClassifiesAsLocatorFailure() {
         TestFailure failure = failureOf("com.microsoft.playwright.TimeoutError", REAL_LOCATOR_NOT_FOUND_MESSAGE);
@@ -38,7 +58,39 @@ public class FailureClassifierTest {
 
     @Test
     void realAssertionFailureClassifiesAsNotFixable() {
+        // AssertionFailedError, but the message is a plain value mismatch, not
+        // "expected to be visible" - a genuine defect, not a locator problem.
         TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_ASSERTION_FAILURE_MESSAGE);
+
+        assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void realVisibilityAssertionTimeoutClassifiesAsLocatorFailure() {
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_VISIBILITY_ASSERTION_NOT_FOUND_MESSAGE);
+
+        assertEquals(Classification.LOCATOR_FAILURE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void secondRealVisibilityAssertionTimeoutClassifiesAsLocatorFailure() {
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_VISIBILITY_ASSERTION_NOT_FOUND_MESSAGE_2);
+
+        assertEquals(Classification.LOCATOR_FAILURE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void visibilityAssertionThatResolvedToAnElementClassifiesAsNotFixable() {
+        // Ambiguous case, same reasoning as locatorFoundButNotVisibleClassifiesAsNotFixable below
+        // but through the assertion-timeout path: the locator DID resolve to a real element, it
+        // just never became visible in time - a real timing/app bug, not a broken locator.
+        String message = "Locator expected to be visible\n"
+                + "Call log:\n"
+                + "Locator.expect with timeout 5000ms\n"
+                + "waiting for locator(\"#inventory_container\")\n"
+                + "  locator resolved to 1 element\n"
+                + "  unexpected value \"hidden\"\n";
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", message);
 
         assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
     }

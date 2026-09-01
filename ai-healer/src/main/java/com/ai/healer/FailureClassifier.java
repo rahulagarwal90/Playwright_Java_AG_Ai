@@ -8,6 +8,16 @@ import java.util.regex.Pattern;
  * real defect as LOCATOR_FAILURE would send the Healer to "fix" a locator that isn't broken and
  * mask a genuine bug, so every check here is conservative: anything that doesn't unambiguously
  * match the locator-not-found pattern falls through to NOT_FIXABLE.
+ *
+ * Two independent failure shapes both count as a locator-not-found pattern: Playwright's own
+ * TimeoutError (a raw page.click(selector)/page.fill(selector) call that never resolves), and
+ * org.opentest4j.AssertionFailedError from a web-first assertion - assertThat(locator).isVisible()
+ * - timing out for the same underlying reason (the locator never resolves), just thrown through a
+ * different API. Confirmed against two real broken locators in the same session:
+ * InventoryPage's "#nventory_container" and CheckoutStepTwoPage's "ummary_subtotal_label", both
+ * asserted via assertThat(...).isVisible() and both surfacing as AssertionFailedError with message
+ * "Locator expected to be visible" and a call log containing "waiting for locator(...)" - no
+ * "resolved to" line at all, same as a genuinely-not-found TimeoutError.
  */
 public class FailureClassifier {
 
@@ -30,7 +40,16 @@ public class FailureClassifier {
         String message = failure.failureMessage == null ? "" : failure.failureMessage;
 
         boolean isTimeoutError = type.contains("TimeoutError") || message.contains("TimeoutError");
-        if (!isTimeoutError) {
+        // Deliberately narrow: only the specific "expected to be visible" web-first assertion
+        // wording, not AssertionFailedError generally - a text mismatch, a count assertion, or any
+        // other assertion failure is a real defect, not a locator problem, and must stay
+        // NOT_FIXABLE. Both phrasings are checked because "Locator expected to be visible" already
+        // contains "expected to be visible" as a substring - kept as two explicit checks so the
+        // intent (and either real wording Playwright might use) stays obvious to a future reader.
+        boolean isVisibilityAssertionFailure = type.contains("AssertionFailedError")
+                && (message.contains("Locator expected to be visible") || message.contains("expected to be visible"));
+
+        if (!isTimeoutError && !isVisibilityAssertionFailure) {
             return Classification.NOT_FIXABLE;
         }
 

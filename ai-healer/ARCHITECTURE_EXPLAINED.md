@@ -6,9 +6,9 @@ temporarily broken from `#login-button` to `#login-button-BROKEN-TEMP` so we cou
 the whole pipeline handle a real failure.
 
 You don't need to be a Java expert to follow this. You just need to follow one webpage's
-worth of story: a test clicked a button that wasn't there, and now eight small classes work
-together to figure out what the *real* button was called — and one of them now goes as far as
-actually rewriting the broken line in the source file.
+worth of story: a test clicked a button that wasn't there, and now nine small classes work
+together to figure out what the *real* button was called, rewrite the broken line in the
+source file, and check the fix actually works before deciding whether to keep it.
 
 ## The story in one paragraph
 
@@ -21,17 +21,20 @@ locator would cause, and if so, ask a local AI model to look at the real page sn
 suggest what the locator *should* have been — using only elements that were genuinely on the
 page, never a guess.
 
-Eight classes divide that job up:
+Nine classes divide that job up. `HealOrchestrator` sits on top and actually drives the rest:
 
 ```
+                         HealOrchestrator (runs everything below, end to end)
+                                 │
 SurefireReportReader → FailureClassifier → LocatorHealer → HealerOllamaClient
    (reads the XML)     (is this fixable?)  (builds the case) (makes the phone call)
         ↓                                        ↑    ↓
    TestFailure ─────────────────────────────────-┘  HealResult → PageObjectPatcher
   (the case file passed between all three)        (the suggestion)  (edits the file)
-        ↑
-DomElement (one page element, many of these live inside the DOM snapshot)
-
+        ↑                                                                │
+DomElement (one page element,                          HealOrchestrator re-runs just that
+many of these live inside the DOM snapshot)            one scenario to verify, then keeps
+                                                         or reverts the edit
 ScenarioNameSanitizer — a shared rule both Hooks and SurefireReportReader use, so their
                         filenames always agree with each other
 ```
@@ -175,6 +178,25 @@ message would contain both "waiting for locator" *and* something like "resolved 
 element." `FailureClassifier` treats that as `NOT_FIXABLE` too — the locator worked, so
 patching it wouldn't fix anything; the timeout is telling you something else is actually
 wrong.
+
+A fourth case, found for real rather than invented: `TimeoutError` isn't the only exception
+shape a broken locator produces. `InventoryPage.verifySuccessfulLogin()` doesn't call
+`click()`/`type()` at all - it calls Playwright's web-first assertion,
+`assertThat(page.locator(inventoryContainer).first()).isVisible()`. When
+`inventoryContainer` was a real, pre-existing typo (`"#nventory_container"`, missing the `i`),
+that assertion timed out and threw `org.opentest4j.AssertionFailedError` - a completely
+different exception type - with message `"Locator expected to be visible"` and a call log
+still containing `"waiting for locator(\"#nventory_container\").first()"`. `FailureClassifier`
+originally only recognized `TimeoutError`, so this classified `NOT_FIXABLE` - a real
+misclassification, not a hypothetical one. Fixed by recognizing this as a second, independent
+pattern: `AssertionFailedError` whose message contains `"expected to be visible"` gets the same
+treatment as `TimeoutError` from there on (same "waiting for locator" requirement, same
+"resolved to N > 0" exclusion) - deliberately narrow, so a real value-mismatch assertion
+(`REAL_ASSERTION_FAILURE_MESSAGE` above) still isn't swept in just because its type also
+happens to be `AssertionFailedError`. A second real locator, `CheckoutStepTwoPage`'s
+`itemTotalLabel` (typo'd to `"ummary_subtotal_label"`), confirmed the same pattern from a
+different page object. Both now classify `LOCATOR_FAILURE` and heal correctly - see
+`LocatorHealer` below for what that healing actually produced.
 
 **Why it's its own class:** This logic needs to stay boring and predictable on purpose — it's
 plain string matching with no AI involved, so the same failure always gets the same verdict,
@@ -435,10 +457,217 @@ responsibility than deciding what to write into it — one is "does this text ch
 everything else," the other is "is this the right fix." Keeping them apart means
 `PageObjectPatcher` can be trusted never to corrupt a file (it has exactly one job, and a
 test-covered refusal path for every way its input could be wrong), while all of the judgment
-about *what* to suggest stays entirely in `LocatorHealer` and, eventually, whatever decides if
-a `"low"` confidence result is even worth applying automatically. That second piece
-(`HealOrchestrator`, wiring all of this together and deciding what to do with the result) is
-still unbuilt.
+about *what* to suggest stays entirely in `LocatorHealer`, and whether a fix is even worth
+keeping stays entirely in `HealOrchestrator` below.
+
+---
+
+## HealOrchestrator
+
+**The problem it solves:** Every class above does one job well, but nobody actually runs them
+in order, decides what a "successful" fix means, or takes responsibility for cleaning up after
+a fix that didn't work. Something has to be the one piece that says: read the failures, skip
+the ones a human needs to look at, ask for a fix, apply it, *check that it actually worked*,
+and only keep it if it did.
+
+**In → out, with real values:** This is the class that runs the entire pipeline for real, so
+walking through what it actually did is more useful than a single input/output pair.
+
+`HealOrchestrator.run()` reads every failure currently in the Surefire report (not just the
+first one) and handles each independently:
+
+- **`NOT_FIXABLE` failures** just get logged - `[NOT_FIXABLE] "Some assertion failure" (org.opentest4j.AssertionFailedError) - needs human attention`
+  - and nothing else happens. No Ollama call, no file touched.
+- **`LOCATOR_FAILURE`s** always get a suggestion from `LocatorHealer` - that much happens
+  everywhere, including in a GitHub PR pipeline (detected the same way `ai-reviewer`'s
+  `GitHubContext.isPresent()` does, duplicated rather than depended on - see below). In a
+  pipeline, that's *all* that happens: the suggestion gets logged and nothing is written or
+  re-run, matching the "suggestion only" design a CI gate needs.
+- **In a local checkout**, it goes further: `PageObjectPatcher` applies the fix, then
+  `HealOrchestrator` re-runs *just that one scenario* - `mvn -pl playwright-tests test
+  -Dcucumber.filter.name="^\QStandard User can login successfully\E$"
+  -Dhealer.skipArtifactCleanup=true` - confirmed for real that the name filter narrows this down
+  to exactly one of five scenarios, not the whole suite. If that re-run passes, the patched file
+  is left exactly as it is, uncommitted, for a human to review. If it still fails, whether the
+  file gets reverted depends on *where* it's still failing - see below.
+
+**A scenario can have more than one broken locator, and the first version of this reverted a
+correct fix whenever the re-run still failed for any reason at all** - including the exact case
+where fixing locator #1 unmasks a previously-hidden locator #2. That meant a correct fix got
+thrown away every time, and a second invocation could never make progress: the file went back to
+its original broken state, so the next full-suite run reported the exact same original failure,
+`HealOrchestrator` "fixed" it again, hit the same masked failure again, reverted again - forever.
+Confirmed for real, twice in a row, against a genuine `passwordInput`/`loginButton`
+double-break fixture.
+
+**The fix**: compare the fresh re-run failure's locator against the one just patched.
+- **Same locator** → the suggested fix didn't work → revert, exactly as before.
+- **A different locator** (or a fresh failure that isn't locator-shaped at all) → the fix was
+  correct, the scenario just has another problem → **keep it**, and immediately chase the
+  newly-unmasked failure the same way, up to `ai.healer.maxRetries` heal attempts total (a
+  global budget shared across every failure `run()` processes in one invocation, not a
+  per-failure allowance - `config.properties`, default `2`).
+
+Re-running the exact same double-break fixture with this fix, `maxRetries=2` (the default):
+```
+[PROGRESS] "Standard User can login successfully" - LoginPage.java:12 "password" -> "#password"
+kept; the scenario's failure has changed to a different locator (#login-button-BROKEN-TEMP) -
+continuing.
+[HEALED] "Standard User can login successfully" - LoginPage.java:13 "#login-button-BROKEN-TEMP"
+-> "#login-button"; re-run passed. Left as an uncommitted change for review.
+```
+Both locators healed and kept in a single invocation - the file ends up byte-for-byte identical
+to its known-correct state, confirmed with `diff`, and a full-suite re-run passes 5/5 for real.
+If `maxRetries` runs out before full resolution, `run()` stops there and the result records which
+locators were healed and kept plus a plain-English note on what's left, e.g. *"test still fails
+after healing LoginPage.java:12 \"password\" -> \"#password\" - the failure has changed to a
+different locator (#login-button-BROKEN-TEMP), which may indicate the original fix was correct
+but the test has more than one problem. Ran out of retries (max 1) before resolving it."* -
+confirmed with `maxRetries=1` forced, which stops after exactly the first fix and correctly
+reports it as kept, not reverted.
+
+**One thing worth knowing about this design**: the budget is *global*, not per-failure. In the
+real run above, the `Login` scenario's chain used both available attempts, so when `run()` moved
+on to the second Surefire failure (`Purchase Flow`, caused by the same underlying break) the
+budget was already spent - it got reported as `MAX_RETRIES_EXCEEDED`, "not attempted," without
+ever being re-checked. A follow-up full-suite run showed `Purchase Flow` was actually already
+passing too (both locators live in the same page object), so that particular report was overly
+pessimistic - `HealOrchestrator` doesn't spend a free re-run confirming an untouched failure
+might already be fixed as a side effect. A reasonable enough trade-off (verifying costs a real
+browser run), but worth knowing if a report says "not attempted" - it might already be fine.
+
+**A second real bug found and fixed in the same pass, unrelated to the revert logic**: each
+re-run spawns a fresh `mvn test` subprocess, and that subprocess's own `Hooks` used to clear
+`target/dom-snapshots/` on startup (its "once per JVM" artifact-clearing logic has no way to know
+a previous JVM already ran once this session) - wiping out *other* not-yet-processed failures'
+DOM snapshots before their turn came, surfacing as `HEAL_ERROR` for reasons that had nothing to
+do with whether they were actually healable. Fixed by having `HealOrchestrator` pass
+`-Dhealer.skipArtifactCleanup=true` on every re-run subprocess it spawns, and `Hooks.setup()`
+checking that system property before clearing anything. Confirmed for real: the MD5 hash of an
+untouched failure's DOM snapshot file was identical before and after two separate re-run
+subprocesses ran.
+
+**Why it's its own class:** It's the only class allowed to make the two decisions everything
+below it deliberately avoids: "is this fix good enough to keep" and "are we in a context where
+we're even allowed to change files." Every other class in this document either reads something,
+asks something, or edits something, but none of them decide whether the *result* was actually
+good - that judgment call needed one place to live, and it needed to be separate from
+`PageObjectPatcher` (which must never judge, only edit) for exactly the same reason `FailureClassifier`
+stays separate from `LocatorHealer`: so a future change to "how do we verify a fix" can't
+accidentally change "how do we edit a file" or vice versa.
+
+**One more thing this class had to get right: not running at all on the wrong data.** Nothing
+used to stop `HealOrchestrator` from being pointed at an *old* report - run the tests, walk away,
+come back the next day, run `HealOrchestrator` again without re-running the tests, and it would
+have happily "healed" yesterday's failures using today's (possibly already-different) source
+files. Tested for real, before any fix: an all-passing test run followed by `HealOrchestrator`
+logged `"HealOrchestrator finished: 0 failure(s) processed."` - and a *missing* `surefire-reports`
+directory entirely logged the exact same line. No crash either way, but no way to tell "you're
+all done" apart from "you never ran the tests" from the output alone.
+
+The fix lives in `SurefireReportReader` (which already owns the directory path, so it's the
+natural place - keeping this out of `HealOrchestrator` also means the check is reachable without
+mocking the filesystem out from under a real `RepoRoot.resolve()` call, which was the first,
+wrong version of this fix: it read the *real* `playwright-tests/target/surefire-reports` directly
+inside `HealOrchestrator.run()`, bypassing whatever `SurefireReportReader` a test had injected -
+every existing test still passed, but only because this repo's real directory happened to exist
+at the time; a fresh checkout would have broken every one of them silently). `readFailures()` now
+checks, in order: does the directory exist; does it contain any `.xml` files; and - only if a
+caller set the `healer.minReportTimestamp` system property - is the newest report file at least
+that recent. Each of the first three produces exactly one clear log line and an empty list, and a
+fresh, non-empty, on-time report that simply contains zero failures gets its own line too:
+`"Test suite passed - nothing to heal."` Confirmed for real, all four cases: renaming the
+directory away, creating it empty, setting `healer.minReportTimestamp` to an hour in the future
+against a real report, and a genuine all-passing run each produced their own distinct message -
+only a fresh, non-empty, on-time, actually-failing report gets processed.
+
+That timestamp is what closes the loop with `run-tests-and-heal.sh` (repo root, the only shell
+script in this project): it captures the time in whole seconds *before* running
+`mvn -pl playwright-tests test`, and if that fails, passes it straight through as
+`-Dhealer.minReportTimestamp` on the `HealOrchestrator` invocation that follows - automatically,
+in the same command, no separate manual step. Run for real against the same double-broken
+`passwordInput`/`loginButton` fixture from above: the script ran the tests, saw them fail, and
+invoked `HealOrchestrator` itself, which healed and kept both locators exactly as the standalone
+run did earlier, all from one command. Run again immediately afterward (everything now fixed):
+```
+=== Running playwright-tests ===
+...
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0
+...
+=== All tests passed - nothing to heal ===
+```
+`HealOrchestrator` is never even invoked on that second run - the script's own `if mvn ...; then`
+branch short-circuits before it gets the chance, which is the cleanest possible "nothing to heal."
+
+**`TestRunAndHeal` does the same job as one `mvn` command instead of two.** The shell script
+above chains two separate Maven invocations - one process runs the tests, exits, and a second
+`mvn -pl ai-healer exec:java` process reads whatever that left behind. `TestRunAndHeal`
+(`com.ai.healer.TestRunAndHeal`, runnable via
+`mvn -pl ai-healer exec:java -Dexec.mainClass=com.ai.healer.TestRunAndHeal`) does the same thing
+in one: it captures the timestamp, runs `mvn -pl playwright-tests test` as a subprocess via a
+small extracted helper (`MavenRunner` - the same `ProcessBuilder`/`inheritIO()` plumbing
+`HealOrchestrator`'s own scenario re-run already used, pulled out so this doesn't duplicate it),
+and if that subprocess exits non-zero, calls `HealOrchestrator.main()` directly as a Java method
+in the *same* JVM - both classes live in `ai-healer`, so there's no reason to pay for a second
+`mvn` startup just to get there. The timestamp still closes the staleness-guard loop exactly as
+before, just via `System.setProperty(...)` instead of a subprocess `-D` flag.
+
+Confirmed for real, via the single `mvn` command above and nothing else - no shell script, no
+manual `HealOrchestrator` invocation: with `InventoryPage`'s `inventoryContainer` temporarily
+broken back to `"#nventory_container"` (the exact typo from the `FailureClassifier` case study
+earlier in this document), `TestRunAndHeal` ran the suite, saw it fail, and healed
+`#inventory_container` back automatically - `[HEALED] "Standard User can login successfully" -
+InventoryPage.java:11 "#nventory_container" -> "#inventory_container"; re-run passed.` The log
+output makes the "one JVM, not two `mvn` processes" claim checkable, too: exactly one
+`Building ai-healer` block appears (the outer command), against two `Building playwright-tests`
+blocks (`TestRunAndHeal`'s own full-suite run, then `HealOrchestrator`'s inner one-scenario
+re-run/verify) - if `HealOrchestrator` had been invoked as a second subprocess, there would be a
+second `Building ai-healer` block, and there isn't one.
+
+That same real run surfaced a genuine bug along the way, since fixed in a follow-up task:
+`CartPage`'s `checkoutButton` field held `"[datatest='checkout']"` (missing the hyphen in
+`data-test`), which matched nothing on the real page. `FailureClassifier` correctly classified
+the resulting `TimeoutError` as `LOCATOR_FAILURE` - its check is a plain substring test,
+`message.contains("waiting for locator")` - but `LocatorHealer`'s own, *stricter* extraction
+regex (`waiting for locator\(["']([^"']+)["']\)`, which assumed the locator text inside contained
+neither quote character) came up empty against `waiting for locator("[datatest='checkout']")`:
+the broken selector's own single-quoted attribute value sits inside the call log's double-quoted
+wrapper, so the regex's `[^"']+` capture stopped at that embedded `'` before it ever reached a
+closing quote, and the whole pattern failed to match. `HealOrchestrator` caught the resulting
+`IllegalStateException` and reported `HEAL_ERROR` rather than crashing - the right behavior for
+something it can't fix, but not the goal.
+
+**The fix**: `LOCATOR_IN_CALL_LOG` now captures the opening quote character itself
+(`waiting for locator\((["'])(.+)\1\)`) and matches the closing delimiter with a *backreference*
+to that same character, rather than a character class that excludes both quote types. Greedy
+backtracking naturally resolves this to the *rightmost* occurrence of the wrapping quote
+immediately before `)` - the true outer boundary - not the first quote character encountered
+anywhere inside. Confirmed for real, with `checkoutButton` still broken: a single `TestRunAndHeal`
+invocation now extracts the full `[datatest='checkout']`, not the truncated `[datatest=`, and
+heals it to `#checkout` - `[PROGRESS] "Standard Customer Complete Purchase Flow" -
+CartPage.java:11 "[datatest='checkout']" -> "#checkout" kept`.
+
+**Chasing the rest of the checkout flow's chain exposed a second, different, still-open gap -
+not a `maxRetries` problem.** Beyond `checkoutButton`, the same scenario has several more real
+pre-existing typos further down, masked by Cucumber's fail-fast until each one ahead of it is
+fixed: `CheckoutStepOnePage.lastNameInput` (`"[data-test'lastName']"`, missing `=`),
+`zipcodeInput`, `continueButton`, and `CheckoutCompletePage.completeHeader`. The natural
+expectation was that running `TestRunAndHeal` a few more times (`ai.healer.maxRetries` defaults
+to `2`, a global budget per invocation) would work through them one or two at a time. That's not
+what happened: after healing `checkoutButton`, the very next unmasked failure -
+`lastNameInput` - throws a raw `com.microsoft.playwright.PlaywrightException`/`DOMException`
+(genuinely invalid CSS attribute-selector syntax, no `=` before the value), not a `TimeoutError`
+or a visibility `AssertionFailedError`. `FailureClassifier` correctly - by its existing, narrow
+design - classifies that `NOT_FIXABLE`, so `HealOrchestrator` stops there. Running `TestRunAndHeal`
+again reproduces the identical `NOT_FIXABLE` result with zero further progress, confirmed for
+real twice in a row - `ai.healer.maxRetries` was never the limiting factor; only one heal
+attempt (`checkoutButton`) was ever needed before hitting a failure shape `FailureClassifier`
+doesn't recognize at all. This is the same underlying shape as `CheckoutStepTwoPage`'s
+already-known `finishButton` bug (`"[data-tes'finish']"`) from earlier in this document - a
+syntactically invalid selector fails differently (and faster - synchronously, no waiting) than a
+syntactically valid-but-wrong one. Extending `FailureClassifier` with a third pattern for this
+shape, plus a locator-extraction path that doesn't depend on a `waiting for locator(...)`
+call-log line (a syntax error never produces one), is real future work - not attempted here.
 
 ---
 

@@ -64,4 +64,62 @@ public class SurefireReportReaderTest {
 
         assertEquals(0, reader.readFailures().size());
     }
+
+    @Test
+    void returnsEmptyListWhenReportsDirectoryExistsButIsEmpty(@TempDir Path tempDir) throws Exception {
+        Path reportsDir = Files.createDirectory(tempDir.resolve("surefire-reports"));
+
+        SurefireReportReader reader = new SurefireReportReader(reportsDir, tempDir.resolve("dom-snapshots"));
+
+        assertEquals(0, reader.readFailures().size());
+    }
+
+    @Test
+    void returnsEmptyListWhenTheReportIsGenuinelyAllPassing(@TempDir Path tempDir) throws Exception {
+        String allPassingXml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<testsuite name=\"com.framework.runners.TestRunner\" tests=\"1\" errors=\"0\" failures=\"0\" skipped=\"0\">\n"
+                + "  <testcase name=\"A passing scenario\" classname=\"Other Flow\" time=\"1.0\"/>\n"
+                + "</testsuite>\n";
+        Path reportsDir = Files.createDirectory(tempDir.resolve("surefire-reports"));
+        Files.writeString(reportsDir.resolve("TEST-com.framework.runners.TestRunner.xml"), allPassingXml);
+
+        SurefireReportReader reader = new SurefireReportReader(reportsDir, tempDir.resolve("dom-snapshots"));
+
+        assertEquals(0, reader.readFailures().size());
+    }
+
+    @Test
+    void ignoresAStaleReportOlderThanTheGivenMinReportTimestamp(@TempDir Path tempDir) throws Exception {
+        Path reportsDir = Files.createDirectory(tempDir.resolve("surefire-reports"));
+        Files.writeString(reportsDir.resolve("TEST-com.framework.runners.TestRunner.xml"), REPORT_XML);
+
+        // A threshold from "the future" relative to the file we just wrote - simulates a report
+        // left over from an earlier, unrelated test run.
+        long futureThreshold = Files.getLastModifiedTime(reportsDir.resolve("TEST-com.framework.runners.TestRunner.xml"))
+                .toMillis() + 3_600_000L;
+        System.setProperty("healer.minReportTimestamp", String.valueOf(futureThreshold));
+        try {
+            SurefireReportReader reader = new SurefireReportReader(reportsDir, tempDir.resolve("dom-snapshots"));
+            assertEquals(0, reader.readFailures().size(), "a report older than minReportTimestamp must be ignored");
+        } finally {
+            System.clearProperty("healer.minReportTimestamp");
+        }
+    }
+
+    @Test
+    void readsAReportThatIsFreshEnoughRelativeToTheGivenMinReportTimestamp(@TempDir Path tempDir) throws Exception {
+        Path reportsDir = Files.createDirectory(tempDir.resolve("surefire-reports"));
+        Files.writeString(reportsDir.resolve("TEST-com.framework.runners.TestRunner.xml"), REPORT_XML);
+
+        // A threshold from well before the file we just wrote - the report is fresh enough.
+        long pastThreshold = Files.getLastModifiedTime(reportsDir.resolve("TEST-com.framework.runners.TestRunner.xml"))
+                .toMillis() - 3_600_000L;
+        System.setProperty("healer.minReportTimestamp", String.valueOf(pastThreshold));
+        try {
+            SurefireReportReader reader = new SurefireReportReader(reportsDir, tempDir.resolve("dom-snapshots"));
+            assertEquals(2, reader.readFailures().size(), "a fresh-enough report must still be read normally");
+        } finally {
+            System.clearProperty("healer.minReportTimestamp");
+        }
+    }
 }

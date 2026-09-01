@@ -35,6 +35,11 @@ public class LocatorHealer {
         public String newSelector;
         public String matchedElement;
         public String confidence;
+        // The original broken locator value this replaces, so a caller (HealOrchestrator) can
+        // tell "the re-run still fails at this exact same locator" (the fix didn't work) apart
+        // from "the re-run now fails at a different locator" (this fix was fine, something else
+        // is broken too) without re-deriving the extraction itself.
+        public String brokenLocator;
         // Where the broken locator field actually lives, so PageObjectPatcher has something to
         // act on. Null/0 when no page object stack frame could be identified (see
         // extractPageObjectLocation) - the caller then has no patchable location, only a
@@ -48,8 +53,20 @@ public class LocatorHealer {
     record PageObjectLocation(Path filePath, int lineNumber) {
     }
 
+    // Group 1 is the wrapping quote character Playwright used (every real call log we've
+    // captured wraps with "..."; the [\"'] keeps '...' recognized too, matching this project's
+    // existing test fixtures). Group 2 is greedy and backreferences group 1 for its closing
+    // delimiter rather than stopping at the first quote character - a real broken locator can
+    // itself contain a quote of the OTHER kind, e.g. CartPage's real
+    // "[datatest='checkout']" (single-quoted attribute value) inside Playwright's
+    // waiting for locator("[datatest='checkout']") (double-quoted wrapper). Greedy backtracking
+    // naturally resolves to the *rightmost* occurrence of the wrapper's own quote immediately
+    // before ")" - i.e. the true closing delimiter - rather than the first quote encountered,
+    // which is exactly what a non-greedy [^"']+ character class got wrong. Confirmed against
+    // that real CartPage failure: this now captures the full "[datatest='checkout']", not just
+    // "[datatest=" truncated at the embedded '.
     private static final Pattern LOCATOR_IN_CALL_LOG =
-            Pattern.compile("waiting for locator\\([\"']([^\"']+)[\"']\\)");
+            Pattern.compile("waiting for locator\\(([\"'])(.+)\\1\\)");
     // Every page object's locator calls go through BasePage's wrapper methods (click/type/...),
     // so that's always the first com.framework frame in the trace and never the actually useful
     // one - it's the same line for nearly every locator failure in the suite. The concrete page
@@ -128,6 +145,7 @@ public class LocatorHealer {
         LOGGER.info("LocatorHealer raw Ollama response:\n" + responseJson);
 
         HealResult result = parseResult(responseJson);
+        result.brokenLocator = brokenLocator;
         PageObjectLocation location = extractPageObjectLocation(failure.stackTrace, brokenLocator);
         if (location != null) {
             result.filePath = location.filePath();
@@ -137,13 +155,22 @@ public class LocatorHealer {
     }
 
     private static String extractBrokenLocator(TestFailure failure) {
-        String message = failure.failureMessage == null ? "" : failure.failureMessage;
-        Matcher matcher = LOCATOR_IN_CALL_LOG.matcher(message);
-        if (!matcher.find()) {
+        String locator = tryExtractBrokenLocator(failure);
+        if (locator == null) {
             throw new IllegalStateException(
                     "Could not extract a locator from the failure message for: " + failure.testName);
         }
-        return matcher.group(1);
+        return locator;
+    }
+
+    // Package-private, null-safe variant HealOrchestrator uses to compare a fresh re-run failure's
+    // locator against a just-applied patch - unlike extractBrokenLocator, doesn't require the
+    // failure to actually be locator-shaped (a fresh failure might not be, if the patch fixed the
+    // locator problem but something else now fails).
+    static String tryExtractBrokenLocator(TestFailure failure) {
+        String message = failure.failureMessage == null ? "" : failure.failureMessage;
+        Matcher matcher = LOCATOR_IN_CALL_LOG.matcher(message);
+        return matcher.find() ? matcher.group(2) : null;
     }
 
     private static String extractFileLineContext(String stackTrace) {

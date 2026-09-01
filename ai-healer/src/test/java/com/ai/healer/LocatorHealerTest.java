@@ -171,6 +171,37 @@ public class LocatorHealerTest {
     }
 
     @Test
+    void extractsFullLocatorWhenItContainsAnInternalQuote(@TempDir Path tempDir) throws Exception {
+        // Real broken locator captured from CartPage.checkoutButton: "[datatest='checkout']" -
+        // a single-quoted attribute value sitting inside Playwright's own double-quoted call log
+        // wrapper. The old [^"']+ character class stopped at the embedded ', truncating the
+        // capture to "[datatest=" and making this un-healable. Confirmed for real: extraction
+        // now returns the full, correct broken locator string.
+        Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
+        Files.writeString(snapshotPath, SNAPSHOT_JSON);
+
+        TestFailure failure = new TestFailure();
+        failure.testName = "Some Scenario";
+        failure.failureMessage = "Call log:\n- waiting for locator(\"[datatest='checkout']\")\n";
+        failure.domSnapshotPath = snapshotPath;
+        failure.domSnapshotFound = true;
+
+        HealerOllamaClient mockClient = mock(HealerOllamaClient.class);
+        when(mockClient.suggestLocator(anyString(), anyString()))
+                .thenReturn("{\"newSelector\":\"#login-button\","
+                        + "\"matchedElement\":\"id=login-button\",\"confidence\":\"high\"}");
+
+        LocatorHealer healer = new LocatorHealer(mockClient);
+        LocatorHealer.HealResult result = healer.heal(failure);
+
+        assertEquals("[datatest='checkout']", result.brokenLocator);
+
+        ArgumentCaptor<String> userPromptCaptor = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(mockClient).suggestLocator(any(), userPromptCaptor.capture());
+        assertTrue(userPromptCaptor.getValue().contains("BROKEN LOCATOR: [datatest='checkout']"));
+    }
+
+    @Test
     void throwsWhenNoDomSnapshotFound() {
         TestFailure failure = new TestFailure();
         failure.testName = "Some Scenario";

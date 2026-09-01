@@ -30,10 +30,17 @@ public class Hooks {
 
     @Before
     public void setup(Scenario scenario) {
-        // This hook runs once before the first scenario and clears stale artifacts
-        // from previous Playwright / Allure executions.
+        // This hook runs once before the first scenario and clears stale artifacts from previous
+        // Playwright / Allure executions. HealOrchestrator sets -Dhealer.skipArtifactCleanup=true
+        // on its own re-run subprocesses to skip this: that subprocess is a fresh JVM (so
+        // reportsCleared starts false again there too), and clearing target/dom-snapshots/ would
+        // destroy other not-yet-processed failures' DOM snapshots mid-orchestration.
         if (!reportsCleared) {
-            clearPreviousRunArtifacts();
+            if (Boolean.getBoolean("healer.skipArtifactCleanup")) {
+                logger.info("Skipping artifact cleanup (healer.skipArtifactCleanup=true) - preserving prior findings for HealOrchestrator.");
+            } else {
+                clearPreviousRunArtifacts();
+            }
             reportsCleared = true;
         }
 

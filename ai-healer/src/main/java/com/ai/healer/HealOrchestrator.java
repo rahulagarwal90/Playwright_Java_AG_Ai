@@ -1,0 +1,374 @@
+package com.ai.healer;
+
+import java.io.IOException;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Logger;
+
+/**
+ * Runs the whole Healer chain end to end: reads failures (SurefireReportReader), classifies each
+ * (FailureClassifier), and for every LOCATOR_FAILURE asks LocatorHealer for a fix. In a local
+ * checkout it goes further - applies the fix (PageObjectPatcher), re-runs just that one scenario
+ * to verify, and only reverts the file if the re-run still fails at the SAME locator. In a GitHub
+ * PR pipeline context it stops after producing the suggestion: never patches a file or re-runs
+ * tests there, matching the "suggestion only" design CI needs. Never touches git, ever - a fix
+ * that sticks is left as an uncommitted change for a human to review and commit themselves.
+ *
+ * A single scenario can have more than one broken locator, and Cucumber only ever reports the
+ * first one it hits - fixing it can unmask a second failure that was previously hidden behind it.
+ * Rather than discard a correct fix just because the scenario still fails afterward (on a
+ * *different* locator), HealOrchestrator compares the fresh post-re-run failure's locator against
+ * the one it just patched: same locator means the fix didn't work and gets reverted; a different
+ * locator (or a failure that isn't locator-shaped at all) means the fix was fine and gets kept,
+ * and the newly-unmasked failure is chased in turn - up to `ai.healer.maxRetries` heal attempts
+ * total per `run()` invocation (a global budget across every failure processed, not per-failure).
+ * Once that budget is exhausted, healing stops and the result records which locators were healed
+ * and kept, and a plain-English note on whatever's left. (An earlier version reverted on *any*
+ * still-failing re-run, which meant a second invocation could never make progress on a
+ * multi-locator scenario - see ARCHITECTURE_EXPLAINED.md for that real experiment.)
+ */
+public class HealOrchestrator {
+
+    private static final Logger LOGGER = Logger.getLogger(HealOrchestrator.class.getName());
+
+    public enum Outcome {
+        // Fully passes now - one or more patches were applied and kept.
+        HEALED,
+        // Passes without any new patch this run (fixed by an earlier failure in this batch).
+        ALREADY_PASSING,
+        // A patch was reverted because the re-run still failed at that exact same locator.
+        HEAL_FAILED,
+        // LocatorHealer couldn't resolve a patchable file/line, or PageObjectPatcher refused, and
+        // the scenario is still failing.
+        PATCH_REFUSED,
+        // The global heal-attempt budget ran out before this scenario fully passed - may still
+        // have made partial progress (see Result.healedAndKept).
+        MAX_RETRIES_EXCEEDED,
+        // Pipeline context: a suggestion was produced and logged; nothing was applied or re-run.
+        SUGGESTION_LOGGED,
+        // FailureClassifier said this isn't a locator problem.
+        NOT_FIXABLE,
+        // Something threw while healing (Ollama unreachable, no DOM snapshot, re-run couldn't
+        // even start, ...).
+        HEAL_ERROR
+    }
+
+    public static class Result {
+        public final TestFailure originalFailure;
+        public final Outcome outcome;
+        // Human-readable "file:line \"old\" -> \"new\"" entries, in the order they were applied
+        // and kept, for every locator that genuinely got fixed while processing this failure.
+        public final List<String> healedAndKept;
+        // Plain-English detail: why a failure remains, why a patch was reverted, or context for
+        // an already-passing/suggestion-only result. Empty string if there's nothing to add.
+        public final String note;
+
+        Result(TestFailure originalFailure, Outcome outcome, List<String> healedAndKept, String note) {
+            this.originalFailure = originalFailure;
+            this.outcome = outcome;
+            this.healedAndKept = healedAndKept;
+            this.note = note;
+        }
+    }
+
+    // Re-runs exactly one Cucumber scenario by name and reports how it went: null if it passed,
+    // or the fresh TestFailure describing how it's still failing. A separate interface (rather
+    // than calling the real Maven subprocess directly) so tests can inject a fake instead of
+    // actually spawning `mvn` and a real browser.
+    @FunctionalInterface
+    interface ScenarioRerunner {
+        TestFailure rerun(String scenarioName) throws IOException, InterruptedException;
+    }
+
+    private final SurefireReportReader reportReader;
+    private final LocatorHealer locatorHealer;
+    private final PageObjectPatcher patcher;
+    private final ScenarioRerunner rerunner;
+    private final boolean pipelineContext;
+    private final int maxRetries;
+
+    public HealOrchestrator() {
+        this(new SurefireReportReader(),
+                new LocatorHealer(new HealerOllamaClient(HttpClient.newHttpClient())),
+                new PageObjectPatcher(),
+                HealOrchestrator::runScenarioViaMaven,
+                isPipelineContext(),
+                HealerConfig.maxRetries());
+    }
+
+    // Package-private, fully injectable constructor so tests can exercise the branching logic
+    // (NOT_FIXABLE handling, pipeline vs. local, revert-vs-keep, retry budget) without a real
+    // Ollama call, a real file, a real Maven subprocess, or depending on the real config file to
+    // test the retry-budget boundary.
+    HealOrchestrator(SurefireReportReader reportReader, LocatorHealer locatorHealer, PageObjectPatcher patcher,
+            ScenarioRerunner rerunner, boolean pipelineContext, int maxRetries) {
+        this.reportReader = reportReader;
+        this.locatorHealer = locatorHealer;
+        this.patcher = patcher;
+        this.rerunner = rerunner;
+        this.pipelineContext = pipelineContext;
+        this.maxRetries = maxRetries;
+    }
+
+    public List<Result> run() throws IOException {
+        // SurefireReportReader itself logs a clear, specific reason (missing directory, empty
+        // directory, or a stale report from an earlier run) whenever it can't find anything fresh
+        // to read - see its own staleness protection. An empty result here can mean any of those,
+        // or a genuinely passing test suite; either way, there's nothing to do.
+        List<TestFailure> failures = reportReader.readFailures();
+        if (failures.isEmpty()) {
+            return List.of();
+        }
+
+        AtomicInteger retriesUsed = new AtomicInteger(0);
+        List<Result> results = new ArrayList<>();
+        for (TestFailure failure : failures) {
+            results.add(processFailure(failure, retriesUsed));
+        }
+        return results;
+    }
+
+    private Result processFailure(TestFailure failure, AtomicInteger retriesUsed) {
+        FailureClassifier.Classification classification = FailureClassifier.classify(failure);
+        if (classification == FailureClassifier.Classification.NOT_FIXABLE) {
+            LOGGER.warning("[NOT_FIXABLE] \"" + failure.testName + "\" (" + failure.failureType
+                    + ") - needs human attention");
+            return new Result(failure, Outcome.NOT_FIXABLE, List.of(), failure.failureType);
+        }
+
+        if (pipelineContext) {
+            try {
+                LocatorHealer.HealResult healResult = locatorHealer.heal(failure);
+                LOGGER.info("[SUGGESTION] \"" + failure.testName + "\" -> " + healResult.filePath + ":"
+                        + healResult.lineNumber + " newSelector=" + healResult.newSelector
+                        + " confidence=" + healResult.confidence + " matchedElement=" + healResult.matchedElement
+                        + " (pipeline context: suggestion only - no file changes, no test re-run)");
+                return new Result(failure, Outcome.SUGGESTION_LOGGED, List.of(), healResult.newSelector);
+            } catch (Exception e) {
+                LOGGER.severe("[HEAL_ERROR] \"" + failure.testName + "\" - "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
+                return new Result(failure, Outcome.HEAL_ERROR, List.of(), e.getMessage());
+            }
+        }
+
+        return healWithRetryChain(failure, retriesUsed);
+    }
+
+    // The core loop: heal the current known failure, patch, re-run, and decide whether to keep
+    // or revert based on whether the fresh failure (if any) is at the same locator or a different
+    // one. On "different locator," the loop continues with that fresh failure instead of stopping
+    // - chasing a chain of previously-masked breaks - until it passes, hits a non-locator failure,
+    // or the shared retry budget runs out.
+    private Result healWithRetryChain(TestFailure originalFailure, AtomicInteger retriesUsed) {
+        List<String> healedAndKept = new ArrayList<>();
+        TestFailure currentFailure = originalFailure;
+
+        while (true) {
+            if (currentFailure != originalFailure) {
+                // A chained failure - re-classify it, since fixing a locator can unmask a
+                // completely different, non-locator problem instead of another locator.
+                FailureClassifier.Classification classification = FailureClassifier.classify(currentFailure);
+                if (classification == FailureClassifier.Classification.NOT_FIXABLE) {
+                    String note = "after healing " + lastHealed(healedAndKept) + ", the test now fails for a "
+                            + "different, non-locator reason (" + currentFailure.failureType + ") - needs human attention.";
+                    LOGGER.warning("[NOT_FIXABLE] \"" + originalFailure.testName + "\" - " + note);
+                    return new Result(originalFailure, Outcome.NOT_FIXABLE, healedAndKept, note);
+                }
+            }
+
+            if (retriesUsed.get() >= maxRetries) {
+                String note = healedAndKept.isEmpty()
+                        ? "retry budget (" + maxRetries + ") was already exhausted by earlier failures in this "
+                            + "batch before this one could be attempted."
+                        : "test still fails after healing " + lastHealed(healedAndKept) + " - the failure has "
+                            + describeCurrentFailure(currentFailure) + ", which may indicate the original fix "
+                            + "was correct but the test has more than one problem. Ran out of retries (max "
+                            + maxRetries + ") before resolving it.";
+                LOGGER.warning("[MAX_RETRIES_EXCEEDED] \"" + originalFailure.testName + "\" - " + note);
+                return new Result(originalFailure, Outcome.MAX_RETRIES_EXCEEDED, healedAndKept, note);
+            }
+
+            LocatorHealer.HealResult healResult;
+            try {
+                retriesUsed.incrementAndGet();
+                healResult = locatorHealer.heal(currentFailure);
+            } catch (Exception e) {
+                LOGGER.severe("[HEAL_ERROR] \"" + originalFailure.testName + "\" - "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
+                return new Result(originalFailure, Outcome.HEAL_ERROR, healedAndKept, e.getMessage());
+            }
+
+            if (healResult.filePath == null) {
+                String note = "LocatorHealer could not resolve a patchable file/line for this failure";
+                LOGGER.warning("[PATCH_REFUSED] \"" + originalFailure.testName + "\" - " + note);
+                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, note);
+            }
+
+            String originalContent;
+            try {
+                originalContent = Files.readString(healResult.filePath, StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                LOGGER.severe("[PATCH_REFUSED] \"" + originalFailure.testName + "\" - could not read "
+                        + healResult.filePath + ": " + e.getMessage());
+                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, e.getMessage());
+            }
+
+            PageObjectPatcher.PatchResult patchResult =
+                    patcher.patch(healResult.filePath, healResult.lineNumber, healResult.newSelector);
+
+            TestFailure freshFailure;
+            try {
+                freshFailure = rerunner.rerun(currentFailure.testName);
+            } catch (Exception e) {
+                LOGGER.severe("[HEAL_ERROR] \"" + originalFailure.testName + "\" - failed to re-run: " + e.getMessage());
+                if (patchResult.applied) {
+                    revert(healResult.filePath, originalContent, currentFailure.testName);
+                }
+                return new Result(originalFailure, Outcome.HEAL_ERROR, healedAndKept, e.getMessage());
+            }
+
+            if (freshFailure == null) {
+                // Passed.
+                if (patchResult.applied) {
+                    healedAndKept.add(describePatch(healResult));
+                    LOGGER.info("[HEALED] \"" + originalFailure.testName + "\" - " + describePatch(healResult)
+                            + "; re-run passed. Left as an uncommitted change for review.");
+                    return new Result(originalFailure, Outcome.HEALED, healedAndKept, "");
+                }
+                LOGGER.info("[ALREADY_PASSING] \"" + originalFailure.testName + "\" - " + patchResult.reason
+                        + "; re-run already passes without this patch (likely fixed by an earlier "
+                        + "failure in this same batch).");
+                return new Result(originalFailure, Outcome.ALREADY_PASSING, healedAndKept, patchResult.reason);
+            }
+
+            if (!patchResult.applied) {
+                // Refused, and still failing - genuinely nothing this attempt could do.
+                LOGGER.warning("[PATCH_REFUSED] \"" + originalFailure.testName + "\" - " + patchResult.reason);
+                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, patchResult.reason);
+            }
+
+            String freshLocator = LocatorHealer.tryExtractBrokenLocator(freshFailure);
+            boolean sameLocator = healResult.newSelector.equals(freshLocator);
+
+            if (sameLocator) {
+                revert(healResult.filePath, originalContent, currentFailure.testName);
+                String note = "applied \"" + healResult.newSelector + "\" but the scenario still fails at that "
+                        + "exact same locator - the suggested fix did not resolve it. Reverted.";
+                LOGGER.warning("[HEAL_FAILED] \"" + originalFailure.testName + "\" - " + note);
+                return new Result(originalFailure, Outcome.HEAL_FAILED, healedAndKept, note);
+            }
+
+            // Different locator (or a fresh failure that isn't locator-shaped at all) - genuine
+            // progress. Keep this patch and chase the newly-unmasked failure in turn.
+            healedAndKept.add(describePatch(healResult));
+            LOGGER.info("[PROGRESS] \"" + originalFailure.testName + "\" - " + describePatch(healResult)
+                    + " kept; the scenario's failure has " + describeCurrentFailure(freshFailure) + " - continuing.");
+            currentFailure = freshFailure;
+        }
+    }
+
+    private static String describePatch(LocatorHealer.HealResult healResult) {
+        String location = healResult.filePath != null
+                ? healResult.filePath.getFileName() + ":" + healResult.lineNumber
+                : "?";
+        return location + " \"" + healResult.brokenLocator + "\" -> \"" + healResult.newSelector + "\"";
+    }
+
+    private static String describeCurrentFailure(TestFailure failure) {
+        String locator = LocatorHealer.tryExtractBrokenLocator(failure);
+        return locator != null
+                ? "changed to a different locator (" + locator + ")"
+                : "changed to a different, non-locator problem (" + failure.failureType + ")";
+    }
+
+    private static String lastHealed(List<String> healedAndKept) {
+        return healedAndKept.isEmpty() ? "the previous locator" : healedAndKept.get(healedAndKept.size() - 1);
+    }
+
+    private void revert(Path filePath, String originalContent, String testName) {
+        try {
+            Files.writeString(filePath, originalContent, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            LOGGER.severe("[REVERT FAILED] \"" + testName + "\" - could not restore " + filePath + ": " + e.getMessage());
+        }
+    }
+
+    // Re-runs exactly one Cucumber scenario via a fresh `mvn -pl playwright-tests test` subprocess,
+    // filtered to that scenario's exact name (anchored regex, so one scenario name being a
+    // substring of another can't accidentally run both). Passes -Dhealer.skipArtifactCleanup=true
+    // so this subprocess's own Hooks doesn't wipe target/dom-snapshots/ - that would destroy the
+    // DOM snapshots other not-yet-processed failures in this batch still need. Inherits this
+    // process's stdio so the real Maven/Playwright output streams through live, same as running it
+    // by hand. Waits up to a generous multiple of playwright.timeout (a safety net against a truly
+    // hung subprocess, e.g. a browser that never launches - not a tight budget).
+    private static TestFailure runScenarioViaMaven(String scenarioName) throws IOException, InterruptedException {
+        Path repoRoot = RepoRoot.resolve(HealOrchestrator.class);
+        String nameRegex = "^\\Q" + scenarioName + "\\E$";
+        long waitTimeoutMs = Math.max(60_000L, HealerConfig.playwrightTimeoutMs() * 8L);
+
+        int exitCode = MavenRunner.run(repoRoot, List.of(
+                "-pl", "playwright-tests", "test",
+                "-Dcucumber.filter.name=" + nameRegex,
+                "-Dsurefire.failIfNoSpecifiedTests=false",
+                "-Dhealer.skipArtifactCleanup=true"),
+                waitTimeoutMs);
+
+        if (exitCode == 0) {
+            return null;
+        }
+
+        SurefireReportReader freshReader = new SurefireReportReader(
+                repoRoot.resolve("playwright-tests/target/surefire-reports"),
+                repoRoot.resolve("playwright-tests/target/dom-snapshots"));
+        for (TestFailure failure : freshReader.readFailures()) {
+            if (failure.testName.equals(scenarioName)) {
+                return failure;
+            }
+        }
+        TestFailure unknown = new TestFailure();
+        unknown.testName = scenarioName;
+        unknown.failureType = "unknown";
+        unknown.failureMessage = "Re-run exited non-zero, but no matching failure was found in the fresh Surefire report.";
+        return unknown;
+    }
+
+    // Mirrors ai-reviewer's GitHubContext.isPresent() exactly, duplicated rather than depended on:
+    // ai-healer is documented as having no dependency on either other module, and reusing a single
+    // boolean check isn't worth pulling in a whole module for - same call already made for
+    // HealerOllamaClient vs. ai-reviewer's OllamaConfig. If a real shared layer ever gets built,
+    // this is one of the things that would move into it.
+    private static boolean isPipelineContext() {
+        return notBlank(System.getenv("GITHUB_REPOSITORY"))
+                && (notBlank(System.getenv("GITHUB_PR_NUMBER")) || notBlank(System.getenv("CHANGE_ID")))
+                && notBlank(System.getenv("GITHUB_TOKEN"));
+    }
+
+    private static boolean notBlank(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    public static void main(String[] args) throws IOException {
+        List<Result> results = new HealOrchestrator().run();
+        if (results.isEmpty()) {
+            // SurefireReportReader already logged exactly why (missing/empty/stale report, or a
+            // genuinely passing test suite).
+            LOGGER.info("Nothing to heal.");
+            return;
+        }
+        LOGGER.info("HealOrchestrator finished: " + results.size() + " failure(s) processed.");
+        for (Result result : results) {
+            LOGGER.info("  \"" + result.originalFailure.testName + "\" -> " + result.outcome);
+            for (String healed : result.healedAndKept) {
+                LOGGER.info("      healed+kept: " + healed);
+            }
+            if (result.note != null && !result.note.isBlank()) {
+                LOGGER.info("      note: " + result.note);
+            }
+        }
+    }
+}
