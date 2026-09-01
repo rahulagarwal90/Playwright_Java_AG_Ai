@@ -79,6 +79,34 @@ public class FailureClassifierTest {
             + "Call log:\n"
             + "- waiting for [data-test=continue']\n";
 
+    // Captured verbatim from a real run with CheckoutCompletePage's completeHeader field broken
+    // to ".completeheader" (missing the hyphen) - matches nothing on the real page.
+    // assertThat(locator).hasText(...) times out with "Received: null" and no
+    // "locator resolved to <...>" line in the call log - Playwright's own signal that zero
+    // elements resolved, not that a real element's text genuinely differs.
+    private static final String REAL_TEXT_NOT_FOUND_MESSAGE =
+            "Locator expected to have text: Thank you for your order!\n"
+            + "Received: null\n"
+            + "\n"
+            + "Call log:\n"
+            + "Locator.expect with timeout 5000ms\n"
+            + "waiting for locator(\".completeheader\")\n";
+
+    // Captured verbatim from a real run with completeHeader restored to the correct
+    // ".complete-header" but with a deliberately wrong expected string. The element genuinely
+    // WAS found - "locator resolved to <h2 ...>" shows the real element - and its real text
+    // ("Thank you for your order!") genuinely differs from what was asserted. A real defect
+    // (wrong expected value / wrong app copy), not a broken locator - must stay NOT_FIXABLE.
+    private static final String REAL_GENUINE_TEXT_MISMATCH_MESSAGE =
+            "Locator expected to have text: TEMP: deliberately wrong expected text for classifier testing\n"
+            + "Received: Thank you for your order!\n"
+            + "\n"
+            + "Call log:\n"
+            + "Locator.expect with timeout 5000ms\n"
+            + "waiting for locator(\".complete-header\")\n"
+            + "  locator resolved to <h2 class=\"complete-header\" data-test=\"complete-head…>Thank you for your order!</h2>\n"
+            + "  unexpected value \"Thank you for your order!\"\n";
+
     @Test
     void realLocatorTimeoutClassifiesAsLocatorFailure() {
         TestFailure failure = failureOf("com.microsoft.playwright.TimeoutError", REAL_LOCATOR_NOT_FOUND_MESSAGE);
@@ -171,6 +199,23 @@ public class FailureClassifierTest {
                 + "Call log:\n"
                 + "  - navigating to \"https://www.saucedemo.com\", waiting until \"load\"\n";
         TestFailure failure = failureOf("com.microsoft.playwright.TimeoutError", message);
+
+        assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void realTextNotFoundAssertionClassifiesAsLocatorFailure() {
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_TEXT_NOT_FOUND_MESSAGE);
+
+        assertEquals(Classification.LOCATOR_FAILURE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void realGenuineTextMismatchOnFoundElementClassifiesAsNotFixable() {
+        // Same assertion, same locator field, only the selector's real-world correctness
+        // differs from the case above - proof this isn't classifying on "hasText() failed" but
+        // specifically on "Received: null" (nothing found).
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_GENUINE_TEXT_MISMATCH_MESSAGE);
 
         assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
     }

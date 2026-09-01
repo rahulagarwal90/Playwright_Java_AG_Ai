@@ -9,7 +9,7 @@ import java.util.regex.Pattern;
  * mask a genuine bug, so every check here is conservative: anything that doesn't unambiguously
  * match the locator-not-found pattern falls through to NOT_FIXABLE.
  *
- * Three independent failure shapes count as a locator-not-found (or locator-can't-even-be-built)
+ * Four independent failure shapes count as a locator-not-found (or locator-can't-even-be-built)
  * pattern:
  * <ol>
  *   <li>Playwright's own TimeoutError (a raw page.click(selector)/page.fill(selector) call that
@@ -32,14 +32,21 @@ import java.util.regex.Pattern;
  *   ("[data-test=continue']", unterminated quote) is rejected by Playwright's own CSS parser
  *   before it ever reaches the browser ("Unexpected token ... while parsing selector ...", call
  *   log reads a bare "waiting for &lt;selector&gt;" with no locator(...) wrapper at all).</li>
+ *   <li>org.opentest4j.AssertionFailedError from a DIFFERENT web-first assertion,
+ *   assertThat(locator).hasText(...), for the same underlying reason as pattern 2 - the locator
+ *   never resolves - but deliberately NOT for a real text-content mismatch on an element that
+ *   WAS found (a genuine defect that must stay NOT_FIXABLE). Playwright's own message reliably
+ *   tells the two apart: "Received: null" means zero elements resolved (nothing to read text
+ *   from); "Received: &lt;the actual text&gt;" plus a call log line like
+ *   "locator resolved to &lt;h2 ...&gt;...&lt;/h2&gt;" means a real element was found and its
+ *   real text genuinely differs. Confirmed against both shapes for real with the identical
+ *   locator/assertion, only the selector's correctness differing: CheckoutCompletePage's
+ *   completeHeader, broken to ".completeheader" (matches nothing).</li>
  * </ol>
- * Not every real broken-looking locator hits one of these three, on purpose - see
- * ARCHITECTURE_EXPLAINED.md for two real ones deliberately left NOT_FIXABLE:
- * CheckoutStepOnePage's zipcodeInput turned out not to be broken at all (an unquoted CSS
- * attribute value is functionally identical to a quoted one), and CheckoutCompletePage's
- * completeHeader is syntactically valid-but-wrong CSS that fails via a *different* web-first
- * assertion wording ("Locator expected to have text", from .hasText(), not .isVisible()) that
- * pattern 2 deliberately doesn't recognize.
+ * Not every real broken-looking locator hits one of these four, on purpose - see
+ * ARCHITECTURE_EXPLAINED.md for a real one deliberately left NOT_FIXABLE: CheckoutStepOnePage's
+ * zipcodeInput turned out not to be broken at all - an unquoted CSS attribute value is
+ * functionally identical to a quoted one.
  */
 public class FailureClassifier {
 
@@ -81,6 +88,29 @@ public class FailureClassifier {
                 // The locator did match something, so it isn't broken - the element exists but
                 // timed out on some other condition. Treating this as fixable would paper over
                 // a real bug (visibility/timing/app state), so it stays NOT_FIXABLE.
+                return Classification.NOT_FIXABLE;
+            }
+            return Classification.LOCATOR_FAILURE;
+        }
+
+        // Fourth pattern: AssertionFailedError from .hasText() (or any other web-first assertion
+        // phrased "expected to have text"), timing out for the exact same "locator never
+        // resolves" reason as pattern 2's .isVisible() case - NOT a text-content mismatch on a
+        // real, found element (a genuine defect - wrong expected value, or the app's real copy
+        // differing from what the test expects - that must stay NOT_FIXABLE; auto-"fixing" the
+        // locator there would edit a selector that was never broken). Confirmed for real against
+        // both shapes with the identical locator/assertion, only the selector's correctness
+        // differing: CheckoutCompletePage.completeHeader broken to ".completeheader" (matches
+        // nothing) produced "Received: null" with no "locator resolved to <...>" line in the call
+        // log at all; the same assertion against the real, correct ".complete-header" but with a
+        // deliberately wrong expected string produced "Received: Thank you for your order!" (the
+        // element's real text) plus "locator resolved to <h2 class=\"complete-header\" ...>...
+        // </h2>" - proof the element genuinely was found. "Received: null" is the precise,
+        // sufficient discriminator Playwright itself provides between the two.
+        boolean isTextNotFoundAssertionFailure = type.contains("AssertionFailedError")
+                && message.contains("Locator expected to have text") && message.contains("Received: null");
+        if (isTextNotFoundAssertionFailure) {
+            if (!message.contains("waiting for locator")) {
                 return Classification.NOT_FIXABLE;
             }
             return Classification.LOCATOR_FAILURE;

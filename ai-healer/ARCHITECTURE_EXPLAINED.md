@@ -219,16 +219,43 @@ third, independent pattern: `PlaywrightException` whose message contains either
 unconditionally - this pattern deliberately skips the "waiting for locator" / "resolved to"
 checks the other two patterns share, since a parse-time failure never produces either. Both real
 sub-shapes now classify `LOCATOR_FAILURE` and heal correctly - see `LocatorHealer` below for the
-matching extraction-regex fallback the second sub-shape needed. Two more real locators from the
-same chain deliberately do **not** match this or any pattern, on purpose: `zipcodeInput`
+matching extraction-regex fallback the second sub-shape needed. One more real locator from the
+same chain deliberately does **not** match this or any pattern, on purpose: `zipcodeInput`
 (`"[data-test=postalCode]"`, unquoted) turned out not to be broken at all - an unquoted CSS
 attribute value is functionally identical to a quoted one, confirmed by a clean, all-passing run
-with it in that state - and `CheckoutCompletePage.completeHeader` (`".completeheader"`, missing
-a hyphen) is syntactically *valid* CSS that simply matches nothing, asserted via `.hasText()`
-rather than `.isVisible()`, so its real `AssertionFailedError` message reads `"Locator expected
-to have text: ..."` - a wording pattern 2 deliberately doesn't recognize. That one stays
-`NOT_FIXABLE`, correctly and on purpose, for now - see the "still-open gap" note in the
-`HealOrchestrator` section below.
+with it in that state.
+
+A sixth case is the one that most needed careful verification before writing any code, because
+guessing wrong here would have meant auto-"fixing" a locator that was never broken.
+`CheckoutCompletePage.completeHeader`'s real failure - `AssertionFailedError`, `"Locator
+expected to have text: Thank you for your order!\nReceived: null"` - looks at first glance like
+it could be a genuine text-content mismatch: a wrong expected value, or the app's real copy
+differing from what the test expects. If that were true, the *locator* wouldn't be the problem
+at all, and adding a pattern that auto-healed it would be actively wrong - editing a selector
+that already worked while masking a real defect. So before writing a fourth pattern, the real
+question got answered for real: with `completeHeader` broken to `.completeheader` (missing the
+hyphen), is the element genuinely not found, or found-but-wrong-text? The message's `"Received:
+null"` and the complete absence of any `"locator resolved to <...>"` line in the call log both
+point to zero elements matched. Restoring the correct `.complete-header` confirmed it directly -
+5/5 tests pass, and the real element is `<h2 class="complete-header"
+data-test="complete-header">Thank you for your order!</h2>`, text matching exactly. For a clean
+side-by-side, the same correct locator was paired with a deliberately wrong expected string:
+```
+Locator expected to have text: TEMP: deliberately wrong expected text for classifier testing
+Received: Thank you for your order!
+Call log:
+waiting for locator(".complete-header")
+  locator resolved to <h2 class="complete-header" data-test="complete-head…>Thank you for your order!</h2>
+  unexpected value "Thank you for your order!"
+```
+A real `Received:` value, and a call log line that echoes back the actual matched element -
+unmistakably different from the broken-locator case. `completeHeader`'s real failure was
+genuinely a broken locator (same underlying "never resolves" cause as pattern 2, just via
+`.hasText()` instead of `.isVisible()`), not a mismatch - so the fourth pattern requires **both**
+`"Locator expected to have text"` *and* `"Received: null"`, tested against both real messages so
+a genuine mismatch (the wrong-expected-string case above) stays `NOT_FIXABLE` on purpose. Both
+now classify correctly, and `completeHeader` heals for real - see `HealOrchestrator` below for
+what that healing actually produced.
 
 **Why it's its own class:** This logic needs to stay boring and predictable on purpose — it's
 plain string matching with no AI involved, so the same failure always gets the same verdict,
@@ -724,15 +751,39 @@ then `finishButton` in a second invocation - all three correctly, `id`-vs-`data-
 all. `zipcodeInput` was never actually broken (an unquoted CSS attribute value is functionally
 identical to a quoted one - confirmed by a clean, all-passing run with it in that state).
 
-**`completeHeader` is where the chain genuinely stops now, and correctly so.** It's syntactically
-*valid* CSS that just matches nothing - the same underlying "locator never resolves" problem as
-pattern 2 - but it's asserted via `assertThat(locator).hasText(...)` rather than `.isVisible()`,
-so its real `AssertionFailedError` message reads `"Locator expected to have text: Thank you for
-your order!\nReceived: null"`, not "expected to be visible." Pattern 2's wording check is
-deliberately narrow and doesn't match that, so this stays `NOT_FIXABLE` - a real, still-open gap
-(a fourth pattern generalizing "web-first assertion timeout" across whichever assertion method
-Playwright names, not just `.isVisible()`), left unfixed and out of scope for the task that found
-it.
+**`completeHeader` was where the chain stopped - until the question "is this actually a broken
+locator?" got answered for real instead of assumed.** Its `AssertionFailedError` message reads
+`"Locator expected to have text: Thank you for your order!\nReceived: null"` - at a glance this
+looks like it could be a text-content mismatch (a real defect: wrong expected value, or the
+app's real copy differing from the test), which would mean auto-healing the *locator* here would
+be wrong regardless of what pattern caught it. Verified which one it actually was, rather than
+guessing: with `completeHeader` broken to `.completeheader` (missing the hyphen), `"Received:
+null"` and **no** `"locator resolved to <...>"` line anywhere in the call log - Playwright's own
+signal that the locator matched *zero* elements. Restoring the real, correct `.complete-header`
+and re-running confirmed it directly: 5/5 pass, and the real element is `<h2
+class="complete-header" data-test="complete-header">Thank you for your order!</h2>` - text
+matches exactly, nothing wrong with the app or the expected value. To see the *other* shape for
+comparison, the same correct locator was paired with a deliberately wrong expected string:
+```
+Locator expected to have text: TEMP: deliberately wrong expected text for classifier testing
+Received: Thank you for your order!
+
+Call log:
+Locator.expect with timeout 5000ms
+waiting for locator(".complete-header")
+  locator resolved to <h2 class="complete-header" data-test="complete-head…>Thank you for your order!</h2>
+  unexpected value "Thank you for your order!"
+```
+Night-and-day different from the broken-locator case: a real `Received:` value, and a call log
+line that echoes back the actual matched element. `completeHeader`'s real failure was genuinely
+a broken locator, not a mismatch - so `FailureClassifier` gained a fourth pattern:
+`AssertionFailedError` requiring **both** `"Locator expected to have text"` *and* `"Received:
+null"` - the second condition is what keeps a real mismatch (the deliberately-wrong-string case
+above) correctly `NOT_FIXABLE`, tested for real against both real messages. **Confirmed for
+real**: `TestRunAndHeal` healed `completeHeader` to `[data-test='complete-header']` - not the
+original `.complete-header`, since the DOM snapshot only captures `data-test`/`id`/etc. (not CSS
+classes) and the `data-test`-preference fix above chose it anyway - and the full suite now
+passes 5/5. Every locator broken across this session's checkout-flow chain is healed.
 
 ---
 

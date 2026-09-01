@@ -8,7 +8,7 @@ import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertTha
 public class CheckoutCompletePage extends BasePage {
 
     // Locators
-    private final String completeHeader = ".complete-header";
+    private final String completeHeader = "[data-test='complete-header']";
 
     public CheckoutCompletePage(Page page) {
         super(page);
