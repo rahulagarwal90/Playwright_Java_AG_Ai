@@ -22,3 +22,9 @@ Feature: DemoQA UI Elements Testing
     Given I navigate to the DemoQA Select Menu page
     When I select the "Blue" option from the Old Style Select Menu
     Then The selected value should be "Blue"
+
+  @StructuralLocator
+  Scenario: User can navigate via a left-nav link identified only by text
+    Given I navigate to the DemoQA Text Box page
+    When I click the Web Tables link in the left navigation
+    Then I should be on the Web Tables page

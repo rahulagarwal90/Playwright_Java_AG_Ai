@@ -67,4 +67,14 @@ public class DemoQaSteps {
         String selected = demoQaPage.getSelectedOldStyleOption();
         assertTrue(selected.equals(expectedValue), "Expected " + expectedValue + " but got " + selected);
     }
+
+    @When("I click the Web Tables link in the left navigation")
+    public void iClickTheWebTablesLinkInTheLeftNavigation() {
+        demoQaPage.clickWebTablesNavLink();
+    }
+
+    @Then("I should be on the Web Tables page")
+    public void iShouldBeOnTheWebTablesPage() {
+        assertTrue(demoQaPage.isOnWebTablesPage(), "Expected to be on the Web Tables page after clicking the nav link.");
+    }
 }
