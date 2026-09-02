@@ -10,11 +10,6 @@ public class InventoryPage extends BasePage {
     // Locators
     private final String inventoryContainer = "#inventory_container";
     private final String cartIcon = ".shopping_cart_link";
-    // Near-duplicate data-test values on purpose: these two "Add to cart" buttons differ from
-    // each other only by their product-name suffix, and each has a matching "Remove" button once
-    // clicked - deliberately static fields (unlike addProductToCart's dynamically-built selector
-    // below) so a human can break one of them and have LocatorHealer prove it picks the correct
-    // specific sibling from real DOM candidates, not a similar-but-wrong one.
     private final String addBackpackToCartButton = "[data-test='add-to-cart-sauce-labs-backpack']";
     private final String addBikeLightToCartButton = "[data-test='add-to-cart-sauce-labs-bike-light']";
     private final String removeBackpackButton = "[data-test='remove-sauce-labs-backpack']";

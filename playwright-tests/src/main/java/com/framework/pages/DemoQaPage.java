@@ -13,10 +13,6 @@ public class DemoQaPage extends BasePage {
     private final String permanentAddressInput = "#permanentAddress";
     private final String submitButton = "#submit";
     private final String outputName = "#name";
-    // Confirmed for real: unlike SauceDemo, DemoQA's left-nav category links carry no id,
-    // data-test, or role attribute at all - Hooks' DOM snapshot only ever captures them by tag
-    // (A) and text, making this genuinely the "no attribute, text/structural identity only" case
-    // (as opposed to InventoryPage's near-duplicate-but-still-data-test-based buttons above).
     private final String webTablesNavLink = "text=Web Tables";
 
     public DemoQaPage(Page page) {
