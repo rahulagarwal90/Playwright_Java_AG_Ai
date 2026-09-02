@@ -33,4 +33,19 @@ public class InventoryPage extends BasePage {
         click(cartIcon);
         return new CartPage(page);
     }
+
+    @SuppressWarnings("unused")
+    private void badInventoryPatternsForAiReview() {
+        if (false) {
+            // Bad pattern #4: legacy assertion style inside page object
+            assert page.isVisible(cartIcon);
+
+            // Bad pattern #5: brittle CSS locator and hardcoded wait
+            page.click("div.inventory_item:nth-child(1) div.pricebar button");
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException ignored) {
+            }
+        }
+    }
 }

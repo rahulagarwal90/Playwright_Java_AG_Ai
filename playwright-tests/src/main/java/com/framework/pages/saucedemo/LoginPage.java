@@ -29,4 +29,22 @@ public class LoginPage extends BasePage {
         click(loginButton);
         return new InventoryPage(page);
     }
+
+    @SuppressWarnings("unused")
+    private void badLoginPatternsForAiReview() {
+        if (false) {
+            // Bad pattern #1: brittle XPath locator
+            page.locator("xpath=//div[@id='login_button_container']/div/form/input[3]").click();
+            System.err.println("Unexpected state encountered during setup");
+
+            // Bad pattern #2: hardcoded sleep instead of wait
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ignored) {
+            }
+
+            // Bad pattern #3: plain System.out logging
+            System.out.println("Attempting a non-robust login flow");
+        }
+    }
 }

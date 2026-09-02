@@ -13,6 +13,32 @@ public class DemoQaSteps {
     private DemoQaPage demoQaPage;
 
     public DemoQaSteps(TestContext testContext) {
+        // The following block is intentionally disabled for AI review testing only.
+        // It contains examples of bad patterns that the reviewer should detect,
+        // but it will not execute during normal scenario setup.
+        if (false) {
+            // 1. Brittle locator pattern for Locator Robustness
+            testContext.getPage().locator("xpath=//div[@class='form-group'][5]/button").click();
+
+            // 2. Legacy assertion for Playwright Web Assertions
+            boolean isSubmitVisible = testContext.getPage().locator("#submit").isVisible();
+            assert isSubmitVisible == true;
+
+            // 3. Logging anti-pattern
+            try {
+                System.out.println("Executing automation verification step...");
+                Thread.sleep(1000); // Hardcoded wait used during verification
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+            // 4. Hardcoded synchronization and brittle wait
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException ignored) {
+            }
+        }
+
         this.demoQaPage = new DemoQaPage(testContext.getPage());
     }
 
