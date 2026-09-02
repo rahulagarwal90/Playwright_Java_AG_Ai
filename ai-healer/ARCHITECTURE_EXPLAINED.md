@@ -785,6 +785,66 @@ original `.complete-header`, since the DOM snapshot only captures `data-test`/`i
 classes) and the `data-test`-preference fix above chose it anyway - and the full suite now
 passes 5/5. Every locator broken across this session's checkout-flow chain is healed.
 
+**A human-readable summary, separate from the detailed logs above.** Every LOGGER line shown
+throughout this section (`[HEALED]`, `[PROGRESS]`, `[MAX_RETRIES_EXCEEDED]`, ...) is still there,
+unchanged - but scrolling back through a long run to answer "did it work, and what do I do next"
+was never their job. `HealOrchestrator.runWithSummary()` (what `main()` - and therefore
+`TestRunAndHeal` and `run-tests-and-heal.sh`, which both end up calling `main()` - actually calls
+now) additionally tracks one `HealAttempt` per unit of `retriesUsed` spent, in order, and
+`buildSummary()` renders them into a clean box printed via `System.out` (not the logger, so it
+has no per-line timestamp prefix) at the very end. Captured for real, healing the exact same
+`CartPage.checkoutButton` / `CheckoutStepOnePage.lastNameInput` chain used earlier in this
+document:
+```
+==========================================
+HEALER RUN SUMMARY
+==========================================
+Attempt 1/2:
+  [HEALED]        CartPage.checkoutButton: "[datatest='checkout']" -> "#checkout"
+Attempt 2/2:
+  [HEALED]        CheckoutStepOnePage.lastNameInput: "[data-test'lastName']" -> "#last-name"
+------------------------------------------
+RESULT: 2 of 2 attempts succeeded.
+Files changed (uncommitted, please review): CartPage.java, CheckoutStepOnePage.java
+==========================================
+```
+The `"ClassName.fieldName"` labels (`CartPage.checkoutButton`, not `CartPage.java:11`) needed one
+small addition to `LocatorHealer`: `LOCATOR_FIELD_DECLARATION`'s regex now captures the field
+name alongside the string literal it already matched, threaded through
+`PageObjectLocation`/`HealResult` as a new `fieldName` field (null when a field declaration
+couldn't be resolved and `PageObjectPatcher` is patching the call-site line instead - the summary
+falls back to the old `file:line` shape in that case).
+
+**Confirming the retry-budget behavior precisely, by reading the code rather than assuming it:**
+`healWithRetryChain`'s loop increments the shared `retriesUsed` counter exactly once per
+iteration (`int attemptNumber = retriesUsed.incrementAndGet();`, immediately before calling
+`locatorHealer.heal(currentFailure)`), and every subsequent branch in that same iteration -
+`HEALED`, `HEAL_FAILED`, `PATCH_REFUSED`, `HEAL_ERROR`, `ALREADY_PASSING` - is the outcome of that
+one already-spent unit, never a fresh one. Concretely: heal the *current* known failure, patch it,
+re-run *only that one scenario* (`rerunner.rerun(currentFailure.testName)`, filtered to that exact
+scenario name), and decide keep-or-revert. If the re-run comes back with a *different* locator (a
+previously-masked one Cucumber's fail-fast had been hiding), the loop doesn't return - it loops
+back to the top and, budget permitting, immediately spends the *next* unit chasing that new
+failure. This is exactly what the two-attempt trace above shows: attempt 1 healed
+`checkoutButton`, which unmasked `lastNameInput`, which attempt 2 then healed in the same
+`runWithSummary()` call. One nuance worth being precise about: the budget is global across the
+*entire* invocation, not per-scenario - if the Surefire report had contained a second, unrelated
+scenario's failure too, healing attempts for it would draw from this exact same counter, not a
+separate one. When the budget runs out before a scenario fully resolves, the summary says so
+explicitly and points at the fix rather than leaving it to be inferred:
+```
+RESULT: 2 of 2 attempts succeeded, retry budget (maxRetries=2) reached.
+If failures remain, re-run this command again to continue healing further.
+```
+This is the correct, expected way to work through a long chain - not a bug. Since
+`HealOrchestrator` only ever sees *one* newly-unmasked failure per re-run (Cucumber's fail-fast
+guarantees that), a chain longer than `maxRetries` genuinely cannot be finished in a single
+invocation; running the same command again picks up exactly where the last one left off (kept
+fixes stay on disk) with a fresh budget. The summary distinguishes this from a failure that
+re-running *won't* help with (`NOT_FIXABLE`, or a reverted `HEAL_FAILED`) with a separate line -
+`"N failure(s) need human attention (not fixable by re-running)"` - so the two situations aren't
+conflated into one generic "still broken" message.
+
 ---
 
 ## A real problem this surfaced — since fixed

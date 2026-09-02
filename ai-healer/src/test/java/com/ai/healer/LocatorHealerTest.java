@@ -168,6 +168,7 @@ public class LocatorHealerTest {
 
         assertEquals(pageFile, location.filePath());
         assertEquals(4, location.lineNumber(), "should report the field declaration line, not the call site line");
+        assertEquals("loginButton", location.fieldName());
     }
 
     @Test

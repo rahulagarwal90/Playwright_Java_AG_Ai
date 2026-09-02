@@ -46,11 +46,19 @@ public class LocatorHealer {
         // suggestion.
         public Path filePath;
         public int lineNumber;
+        // The Java field name the broken locator is declared as (e.g. "checkoutButton"), for a
+        // human-readable "ClassName.fieldName" summary label - see HealOrchestrator's run
+        // summary. Null when lineNumber falls back to the call-site line instead of a resolved
+        // field declaration (see extractPageObjectLocation) - there's no field name to report
+        // in that case.
+        public String fieldName;
     }
 
-    // A resolved (source file, line number) pointing at a page object's locator field.
-    // Package-private (not private) so tests can exercise the resolution logic directly.
-    record PageObjectLocation(Path filePath, int lineNumber) {
+    // A resolved (source file, line number, field name) pointing at a page object's locator
+    // field. fieldName is null when lineNumber falls back to the call-site line rather than a
+    // resolved field declaration. Package-private (not private) so tests can exercise the
+    // resolution logic directly.
+    record PageObjectLocation(Path filePath, int lineNumber, String fieldName) {
     }
 
     // Group 1 is the wrapping quote character Playwright used (every real call log we've
@@ -105,11 +113,6 @@ public class LocatorHealer {
             - You MUST base the replacement only on an id, data-test/data-testid attribute value, \
             role, aria label, or text value that appears EXACTLY in the candidate list below. \
             Never invent, guess, or slightly modify a value that isn't shown there.
-            - When a candidate has BOTH an id and a data-test/data-testid value, prefer a selector \
-            built from data-test/data-testid over one built from id - that is this codebase's \
-            established convention (e.g. InventoryPage.addProductToCart() builds \
-            "[data-test='add-to-cart-...']" by hand, never an id-based selector). Only fall back \
-            to an id-based selector when the candidate has no data-test/data-testid value at all.
             - A candidate's data-test/data-testid value came from a real HTML attribute named \
             EITHER data-test OR data-testid - never an attribute literally named "testId". If you \
             build an attribute selector from it, use the real attribute name, e.g. \
@@ -164,6 +167,7 @@ public class LocatorHealer {
         if (location != null) {
             result.filePath = location.filePath();
             result.lineNumber = location.lineNumber();
+            result.fieldName = location.fieldName();
         }
         return result;
     }
@@ -203,10 +207,11 @@ public class LocatorHealer {
         return matcher.find() ? matcher.group(1) + ":" + matcher.group(2) : null;
     }
 
-    // Matches a page object's locator field declaration, capturing the string literal's exact
-    // content so it can be compared against the broken locator value.
+    // Matches a page object's locator field declaration, capturing the field name (group 1, for
+    // HealOrchestrator's "ClassName.fieldName" summary label) and the string literal's exact
+    // content (group 2, compared against the broken locator value).
     private static final Pattern LOCATOR_FIELD_DECLARATION =
-            Pattern.compile("^\\s*private\\s+final\\s+String\\s+\\w+\\s*=\\s*\"([^\"]*)\"\\s*;\\s*$");
+            Pattern.compile("^\\s*private\\s+final\\s+String\\s+(\\w+)\\s*=\\s*\"([^\"]*)\"\\s*;\\s*$");
 
     // Resolves the concrete page object frame in a stack trace into an actual source file path
     // and line number, so PageObjectPatcher has a real location to act on. Deliberately narrower
@@ -245,23 +250,29 @@ public class LocatorHealer {
 
         Path filePath = repoRoot.resolve("playwright-tests/src/main/java").resolve(packagePath).resolve(fileName);
 
-        int declarationLine = findLocatorDeclarationLine(filePath, brokenLocator);
-        return new PageObjectLocation(filePath, declarationLine > 0 ? declarationLine : callSiteLine);
+        FieldDeclaration declaration = findLocatorDeclaration(filePath, brokenLocator);
+        return declaration != null
+                ? new PageObjectLocation(filePath, declaration.lineNumber(), declaration.fieldName())
+                : new PageObjectLocation(filePath, callSiteLine, null);
     }
 
-    private static int findLocatorDeclarationLine(Path filePath, String brokenLocator) {
+    // Line number plus field name for a resolved "private final String X = "...";" declaration.
+    private record FieldDeclaration(int lineNumber, String fieldName) {
+    }
+
+    private static FieldDeclaration findLocatorDeclaration(Path filePath, String brokenLocator) {
         try {
             List<String> lines = Files.readAllLines(filePath, StandardCharsets.UTF_8);
             for (int i = 0; i < lines.size(); i++) {
                 Matcher fieldMatcher = LOCATOR_FIELD_DECLARATION.matcher(lines.get(i));
-                if (fieldMatcher.matches() && fieldMatcher.group(1).equals(brokenLocator)) {
-                    return i + 1;
+                if (fieldMatcher.matches() && fieldMatcher.group(2).equals(brokenLocator)) {
+                    return new FieldDeclaration(i + 1, fieldMatcher.group(1));
                 }
             }
         } catch (IOException e) {
             // Fall through - the caller falls back to the call-site line.
         }
-        return -1;
+        return null;
     }
 
     private List<DomElement> loadDomSnapshot(TestFailure failure) throws IOException {

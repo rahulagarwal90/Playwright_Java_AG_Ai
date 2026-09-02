@@ -210,6 +210,143 @@ public class HealOrchestratorTest {
         verify(locatorHealer, never()).heal(loginButtonFailure);
     }
 
+    @Test
+    void runWithSummaryTracksEachHealAttemptWithSequentialNumbers(@TempDir Path tempDir) throws Exception {
+        // Same real double-break shape as keepsACorrectPatchWhenRerunFailsAtADifferentLocator
+        // AndChasesIt above: fixing checkoutButton unmasks lastNameInput, previously masked.
+        // Confirms the "one heal attempt per unit of retriesUsed" behavior directly, not just
+        // the per-original-failure Result it produces.
+        Path cartPage = tempDir.resolve("CartPage.java");
+        Path checkoutStepOnePage = tempDir.resolve("CheckoutStepOnePage.java");
+        Files.writeString(cartPage, "private final String checkoutButton = \"[datatest='checkout']\";\n", StandardCharsets.UTF_8);
+        Files.writeString(checkoutStepOnePage, "private final String lastNameInput = \"[data-test'lastName']\";\n", StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure originalFailure = locatorFailure("[datatest='checkout']");
+        when(reader.readFailures()).thenReturn(List.of(originalFailure));
+
+        TestFailure lastNameFailure = locatorFailure("[data-test'lastName']");
+
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        when(locatorHealer.heal(originalFailure)).thenReturn(
+                healResult("[datatest='checkout']", "[data-test='checkout']", cartPage, 1, "checkoutButton"));
+        when(locatorHealer.heal(lastNameFailure)).thenReturn(
+                healResult("[data-test'lastName']", "[data-test='lastName']", checkoutStepOnePage, 1, "lastNameInput"));
+
+        HealOrchestrator.ScenarioRerunner rerunner = mock(HealOrchestrator.ScenarioRerunner.class);
+        when(rerunner.rerun(anyString())).thenReturn(lastNameFailure, (TestFailure) null);
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, rerunner, false, DEFAULT_MAX_RETRIES);
+
+        HealOrchestrator.RunSummary summary = orchestrator.runWithSummary();
+
+        assertEquals(2, summary.attempts().size());
+        assertEquals(1, summary.attempts().get(0).attemptNumber());
+        assertTrue(summary.attempts().get(0).succeeded());
+        assertEquals("HEALED", summary.attempts().get(0).label());
+        assertEquals("CartPage.checkoutButton: \"[datatest='checkout']\" -> \"[data-test='checkout']\"",
+                summary.attempts().get(0).description());
+        assertEquals(2, summary.attempts().get(1).attemptNumber());
+        assertTrue(summary.attempts().get(1).succeeded());
+        assertEquals("CheckoutStepOnePage.lastNameInput: \"[data-test'lastName']\" -> \"[data-test='lastName']\"",
+                summary.attempts().get(1).description());
+        assertEquals(DEFAULT_MAX_RETRIES, summary.maxRetries());
+    }
+
+    @Test
+    void buildSummaryRendersAttemptsResultAndFilesChanged(@TempDir Path tempDir) throws Exception {
+        Path cartPage = tempDir.resolve("CartPage.java");
+        Path checkoutStepOnePage = tempDir.resolve("CheckoutStepOnePage.java");
+        Files.writeString(cartPage, "private final String checkoutButton = \"[datatest='checkout']\";\n", StandardCharsets.UTF_8);
+        Files.writeString(checkoutStepOnePage, "private final String lastNameInput = \"[data-test'lastName']\";\n", StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure originalFailure = locatorFailure("[datatest='checkout']");
+        when(reader.readFailures()).thenReturn(List.of(originalFailure));
+
+        TestFailure lastNameFailure = locatorFailure("[data-test'lastName']");
+
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        when(locatorHealer.heal(originalFailure)).thenReturn(
+                healResult("[datatest='checkout']", "[data-test='checkout']", cartPage, 1, "checkoutButton"));
+        when(locatorHealer.heal(lastNameFailure)).thenReturn(
+                healResult("[data-test'lastName']", "[data-test='lastName']", checkoutStepOnePage, 1, "lastNameInput"));
+
+        HealOrchestrator.ScenarioRerunner rerunner = mock(HealOrchestrator.ScenarioRerunner.class);
+        when(rerunner.rerun(anyString())).thenReturn(lastNameFailure, (TestFailure) null);
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, rerunner, false, DEFAULT_MAX_RETRIES);
+
+        String rendered = HealOrchestrator.buildSummary(orchestrator.runWithSummary());
+
+        assertTrue(rendered.contains("HEALER RUN SUMMARY"));
+        assertTrue(rendered.contains("Attempt 1/2:"));
+        assertTrue(rendered.contains("[HEALED]"));
+        assertTrue(rendered.contains("CartPage.checkoutButton: \"[datatest='checkout']\" -> \"[data-test='checkout']\""));
+        assertTrue(rendered.contains("Attempt 2/2:"));
+        assertTrue(rendered.contains("CheckoutStepOnePage.lastNameInput"));
+        assertTrue(rendered.contains("RESULT: 2 of 2 attempts succeeded"),
+                "rendered summary was:\n" + rendered);
+        assertTrue(rendered.contains("Files changed (uncommitted, please review): CartPage.java, CheckoutStepOnePage.java"),
+                "rendered summary was:\n" + rendered);
+    }
+
+    @Test
+    void buildSummaryTellsUserToRerunWhenBudgetIsReached(@TempDir Path tempDir) throws Exception {
+        // Reuses the exact maxRetries=1 fixture from
+        // stopsAndReportsWhenRetryBudgetIsExhaustedBeforeFullResolution above.
+        Path pageFile = tempDir.resolve("LoginPage.java");
+        Files.writeString(pageFile,
+                "private final String passwordInput = \"password\";\n"
+                + "private final String loginButton = \"#login-button-BROKEN\";\n",
+                StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure originalFailure = locatorFailure("password");
+        when(reader.readFailures()).thenReturn(List.of(originalFailure));
+
+        TestFailure loginButtonFailure = locatorFailure("#login-button-BROKEN");
+
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        when(locatorHealer.heal(originalFailure))
+                .thenReturn(healResult("password", "#password", pageFile, 1));
+
+        HealOrchestrator.ScenarioRerunner rerunner = name -> loginButtonFailure;
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, rerunner, false, 1);
+
+        String rendered = HealOrchestrator.buildSummary(orchestrator.runWithSummary());
+
+        assertTrue(rendered.contains("RESULT: 1 of 1 attempt succeeded, retry budget (maxRetries=1) reached."),
+                "rendered summary was:\n" + rendered);
+        assertTrue(rendered.contains("re-run this command again to continue healing further"),
+                "rendered summary was:\n" + rendered);
+    }
+
+    @Test
+    void buildSummaryExplainsWhenEveryFailureWasNotFixable() throws Exception {
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure notFixable = new TestFailure();
+        notFixable.testName = "Some assertion failure";
+        notFixable.failureType = "org.opentest4j.AssertionFailedError";
+        notFixable.failureMessage = "expected: <a> but was: <b>";
+        when(reader.readFailures()).thenReturn(List.of(notFixable));
+
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, mock(LocatorHealer.class), mock(PageObjectPatcher.class), name -> null, false, DEFAULT_MAX_RETRIES);
+
+        String rendered = HealOrchestrator.buildSummary(orchestrator.runWithSummary());
+
+        assertTrue(rendered.contains("No heal attempts were made"), "rendered summary was:\n" + rendered);
+        assertTrue(rendered.contains("NOT_FIXABLE"), "rendered summary was:\n" + rendered);
+    }
+
     private static TestFailure locatorFailure(String brokenLocator) {
         TestFailure failure = new TestFailure();
         failure.testName = "Standard User can login successfully";
@@ -220,6 +357,11 @@ public class HealOrchestratorTest {
     }
 
     private static LocatorHealer.HealResult healResult(String brokenLocator, String newSelector, Path filePath, int lineNumber) {
+        return healResult(brokenLocator, newSelector, filePath, lineNumber, null);
+    }
+
+    private static LocatorHealer.HealResult healResult(String brokenLocator, String newSelector, Path filePath,
+            int lineNumber, String fieldName) {
         LocatorHealer.HealResult result = new LocatorHealer.HealResult();
         result.brokenLocator = brokenLocator;
         result.newSelector = newSelector;
@@ -227,6 +369,7 @@ public class HealOrchestratorTest {
         result.confidence = "high";
         result.filePath = filePath;
         result.lineNumber = lineNumber;
+        result.fieldName = fieldName;
         return result;
     }
 }

@@ -54,6 +54,31 @@ Notes on step 4: without any GitHub PR context set, the reviewer reviews your lo
 
 Notes on steps 6a/6b: both exit cleanly either way — if the tests pass, they say `"All tests passed - nothing to heal"` and never invoke the Healer at all. If the tests fail, both invoke `com.ai.healer.HealOrchestrator` (see [Section 3b](#3b-playwrighthealer-config-playwright-tests-configproperties)) with a timestamp marking when the run started, so the Healer refuses to process a stale report left over from an earlier run instead of the one that just happened. `TestRunAndHeal` (6a) calls `HealOrchestrator` as a direct Java method call in the same JVM that just ran the tests; `run-tests-and-heal.sh` (6b) does the same thing across two separate `mvn` invocations chained by the shell script. Functionally identical — pick whichever fits how you're already working.
 
+**Reading the summary at the end of a run.** Both 6a and 6b print a clean, human-readable box after all the detailed per-attempt logging, e.g. (captured from a real run against two real broken locators, `CartPage.checkoutButton` and `CheckoutStepOnePage.lastNameInput`, the second one masked behind the first until it was fixed):
+
+```
+==========================================
+HEALER RUN SUMMARY
+==========================================
+Attempt 1/2:
+  [HEALED]        CartPage.checkoutButton: "[datatest='checkout']" -> "#checkout"
+Attempt 2/2:
+  [HEALED]        CheckoutStepOnePage.lastNameInput: "[data-test'lastName']" -> "#last-name"
+------------------------------------------
+RESULT: 2 of 2 attempts succeeded.
+Files changed (uncommitted, please review): CartPage.java, CheckoutStepOnePage.java
+==========================================
+```
+
+**One important thing this summary makes visible: `HealOrchestrator` heals exactly one failure per attempt, not a whole batch at once.** Each `Attempt N/maxRetries` line is one full heal→patch→re-run-that-one-scenario-only cycle, and each one consumes exactly one unit of `ai.healer.maxRetries`'s shared budget — including a newly-unmasked failure a re-run reveals (Cucumber's fail-fast means only one failure per scenario is ever visible at a time, so "the re-run now fails somewhere new" is exactly how a masked locator further down the same test gets discovered and chased). If the budget runs out before a scenario fully resolves, the summary says so explicitly and tells you to re-run the same command:
+
+```
+RESULT: 2 of 2 attempts succeeded, retry budget (maxRetries=2) reached.
+If failures remain, re-run this command again to continue healing further.
+```
+
+Running the command again in that situation is the intended workflow, not a limitation to work around — each invocation picks up wherever the last one left off (the fixes it already made are kept on disk) and spends a fresh `maxRetries` budget chasing whatever's still broken. See `ARCHITECTURE_EXPLAINED.md`'s `HealOrchestrator` section for the full real trace this was captured from, including what the summary looks like when it stops for a different reason (a `NOT_FIXABLE` failure, which re-running won't help with).
+
 **Stopping Ollama**: if you started it with `ollama serve` in a visible terminal tab, `Ctrl+C` in that tab. If it's running in the background or you've lost track of which terminal it's in, `pkill ollama`.
 
 ---
