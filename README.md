@@ -52,7 +52,7 @@ mvn -pl ai-healer exec:java -Dexec.mainClass=com.ai.healer.TestRunAndHeal
 
 Notes on step 4: without any GitHub PR context set, the reviewer reviews your local `git diff HEAD` and prints findings to the terminal only — that's the normal way to sanity-check changes before pushing. See [Section 4](#4-how-the-reviewer-works) for what changes when real PR context is present.
 
-Notes on steps 6a/6b: both exit cleanly either way — if the tests pass, they say `"All tests passed - nothing to heal"` and never invoke the Healer at all. If the tests fail, both invoke `com.ai.healer.HealOrchestrator` (see [Section 3b](#3b-playwrighthealer-config-playwright-tests-configproperties)) with a timestamp marking when the run started, so the Healer refuses to process a stale report left over from an earlier run instead of the one that just happened. `TestRunAndHeal` (6a) calls `HealOrchestrator` as a direct Java method call in the same JVM that just ran the tests; `run-tests-and-heal.sh` (6b) does the same thing across two separate `mvn` invocations chained by the shell script. Functionally identical — pick whichever fits how you're already working.
+Notes on steps 6a/6b: both exit cleanly either way — if the tests pass, they say `"All tests passed - nothing to heal"` and never invoke the Healer at all. If the tests fail, both invoke `com.ai.healer.HealOrchestrator` (config: [Section 3b](#3b-playwright-config-playwright-tests-configproperties) for the Playwright timeout its re-run watchdog derives from, [Section 3c](#3c-ai-healer-local-config-ai-healerconfigproperties) for its own `ai.healer.maxRetries` retry budget) with a timestamp marking when the run started, so the Healer refuses to process a stale report left over from an earlier run instead of the one that just happened. `TestRunAndHeal` (6a) calls `HealOrchestrator` as a direct Java method call in the same JVM that just ran the tests; `run-tests-and-heal.sh` (6b) does the same thing across two separate `mvn` invocations chained by the shell script. Functionally identical — pick whichever fits how you're already working.
 
 **Reading the summary at the end of a run.** Both 6a and 6b print a clean, human-readable box after all the detailed per-attempt logging, e.g. (captured from a real run against two real broken locators, `CartPage.checkoutButton` and `CheckoutStepOnePage.lastNameInput`, the second one masked behind the first until it was fixed):
 
@@ -119,19 +119,31 @@ The reviewer works with any Ollama model that supports structured JSON output (w
 - **Wording varies by model.** The same prompt against a different model can produce differently-worded `problem`/`suggestedFix` text even when the underlying defect it catches is identical. Don't assume byte-for-byte identical output across models — compare on whether the right defects are caught, not on exact phrasing.
 - **Match the model size to your hardware.** A `14b` model (~9GB on disk, quantized) fits comfortably on 24GB of unified memory alongside everything else running. Larger models (`32b` and up) do not have a safe margin at that RAM size — don't switch to one without more memory to spare, or you'll see Ollama fail or the machine swap heavily under load.
 
-### 3b. Playwright/Healer config: playwright-tests config.properties
+### 3b. Playwright config: playwright-tests config.properties
 
-Separate from `ai-reviewer`'s config file above — this one lives at `playwright-tests/src/test/resources/config.properties` and is read by two different consumers, each in its own way. It's tracked in git as-is (not gitignored, no `.example` split — the values in it are non-sensitive: a demo site, a bundled test account).
+Separate from `ai-reviewer`'s config file above — this one lives at `playwright-tests/src/test/resources/config.properties`. It's tracked in git as-is (not gitignored, no `.example` split — the values in it are non-sensitive: a demo site, a bundled test account).
 
 | Setting | `config.properties` key | Read by | Default |
 | --- | --- | --- | --- |
 | Playwright action/navigation timeout (ms) | `playwright.timeout` | `com.framework.config.FrameworkConfig` (via the Owner library, compiled into `playwright-tests`) | `10000` (lowered from Playwright's own 30000ms default, for faster feedback while breaking locators on purpose — raise it back for real CI runs against potentially slower pages) |
-| Max heal-attempt cycles per `HealOrchestrator.run()` | `ai.healer.maxRetries` | `com.ai.healer.HealerConfig` (reads the file directly with plain `java.util.Properties` — `ai-healer` has no dependency on `playwright-tests`, so it can't use `FrameworkConfig`) | `2` |
+
+`HealOrchestrator`'s re-run subprocess watchdog reads this same key too (see below) even though it lives in `playwright-tests`' file, not `ai-healer`'s (Section 3c) — it's a genuine Playwright setting, not a Healer one, and deriving the watchdog from it keeps the two from drifting out of sync by hand.
 
 **Which timeout applies where**, since there are two different things in play here:
 
 - **`playwright.timeout`** bounds *one Playwright action* — a single `click`, `fill`, `waitFor`, navigation, etc. `PlaywrightFactory` applies it to the whole `BrowserContext` right after creating it, so every action any page performs is bound by it. This is the number that actually determines how long a broken-locator test takes to fail.
 - **`HealOrchestrator`'s re-run subprocess watchdog** is *not* a separate config key — it's derived from `playwright.timeout` (`max(60000, playwright.timeout × 8)`, see `runScenarioViaMaven`) and only exists as a safety net against a genuinely hung subprocess (a browser that never launches, a stuck JVM), not as a tight per-scenario budget. A whole scenario re-run involves several sequential actions (each individually bound by `playwright.timeout`) plus Maven/JVM/browser startup overhead, so this is deliberately generous rather than a second number to keep in sync by hand. Raising `playwright.timeout` raises this too, automatically.
+
+### 3c. ai-healer local config: ai-healer/config.properties
+
+A third config file, separate from both above — `ai-healer/config.properties` holds settings that belong to `ai-healer` itself rather than to Playwright test execution. Same personal/untracked convention as `ai-reviewer`'s: copy `ai-healer/config.properties.example` to `ai-healer/config.properties` and edit it there (gitignored; `config.properties.example` stays tracked as the template). Every setting below resolves in the same order: `config.properties` first, then the environment variable, then the hardcoded default — the same three-tier order Section 3a uses, duplicated into `com.ai.healer.HealerOllamaClient`/`com.ai.healer.HealerConfig` rather than shared with `ai-reviewer`'s `OllamaConfig`, since `ai-healer` has no dependency on the `ai-reviewer` module.
+
+| Setting | `config.properties` key | Environment variable | Default |
+| --- | --- | --- | --- |
+| Ollama model | `ollama.model` | `OLLAMA_MODEL` | `qwen2.5-coder:14b` |
+| Max heal-attempt cycles per `HealOrchestrator.run()` | `ai.healer.maxRetries` | `AI_HEALER_MAX_RETRIES` | `2` |
+
+`ai.healer.maxRetries` used to live in `playwright-tests`' config.properties (Section 3b) — moved here since it was never a Playwright test-execution setting; it only ever governed how many heal-attempt cycles `HealOrchestrator` spends. `ollama.baseUrl` isn't in this table: `HealerOllamaClient.baseUrl()` still only resolves via the `OLLAMA_BASE_URL` env var then a hardcoded default, no config-file override yet — nothing so far has needed to point the Healer at a non-default Ollama server.
 
 ---
 

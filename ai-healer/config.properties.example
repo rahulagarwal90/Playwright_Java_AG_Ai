@@ -1,0 +1,7 @@
+# Ollama model. qwen3:14b also tested. Avoid 32b+ on 24GB RAM machines — insufficient margin.
+ollama.model=qwen2.5-coder:14b
+
+# Maximum number of heal-attempt cycles (LocatorHealer calls) HealOrchestrator will spend across
+# all failures in a single invocation before stopping and reporting whatever remains. Read
+# directly by ai-healer's HealerConfig, not through FrameworkConfig - see README Section 3c.
+ai.healer.maxRetries=2

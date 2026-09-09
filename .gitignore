@@ -37,5 +37,8 @@ Thumbs.db
 # ai-reviewer local config — personal, untracked; copy from config.properties.example
 ai-reviewer/config.properties
 
+# ai-healer local config — personal, untracked; copy from config.properties.example
+ai-healer/config.properties
+
 # Claude Code
 CLAUDE.md

@@ -4,23 +4,30 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.io.IOException;
+import java.io.Reader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
 
 /**
  * The one class in ai-healer that talks to Ollama. Deliberately self-contained rather than
  * reusing ai-reviewer's OllamaConfig/OllamaReviewClient — ai-healer has no dependency on the
  * ai-reviewer module, and whether to share a config layer across modules is parked for later.
- * Model and base URL resolve the same way ai-reviewer's OllamaConfig does (env var, falling back
- * to a hardcoded default), just without the config.properties file layer.
+ * Model resolves the same way ai-reviewer's OllamaConfig does: ai-healer/config.properties first,
+ * then the OLLAMA_MODEL env var, then a hardcoded default — the resolution logic is duplicated
+ * here rather than imported, per that same parked sharing decision. Base URL still resolves via
+ * env var then default only; nothing so far has needed to override it per-developer.
  */
 public class HealerOllamaClient {
 
     private static final String DEFAULT_MODEL = "qwen2.5-coder:14b";
     private static final String DEFAULT_BASE_URL = "http://localhost:11434";
+    private static final Path CONFIG_RELATIVE_PATH = Path.of("ai-healer", "config.properties");
 
     // Structured-output schema constraining Ollama's answer to exactly what LocatorHealer needs:
     // the replacement bare selector value (not a Java statement - see LocatorHealer's prompt),
@@ -44,16 +51,43 @@ public class HealerOllamaClient {
         this.httpClient = httpClient;
     }
 
-    // Resolves the Ollama model to use: OLLAMA_MODEL env var, then the default.
+    // Resolves the Ollama model to use: ai-healer/config.properties, then OLLAMA_MODEL, then the
+    // default. Mirrors ai-reviewer's OllamaConfig.model() resolution order exactly.
     public static String model() {
+        String fromConfigFile = readFromConfigFile("ollama.model");
+        if (fromConfigFile != null) {
+            return fromConfigFile;
+        }
         String fromEnv = System.getenv("OLLAMA_MODEL");
-        return (fromEnv != null && !fromEnv.isBlank()) ? fromEnv : DEFAULT_MODEL;
+        if (fromEnv != null && !fromEnv.isBlank()) {
+            return fromEnv;
+        }
+        return DEFAULT_MODEL;
     }
 
     // Resolves the Ollama base URL: OLLAMA_BASE_URL env var, then the default.
     public static String baseUrl() {
         String fromEnv = System.getenv("OLLAMA_BASE_URL");
         return (fromEnv != null && !fromEnv.isBlank()) ? fromEnv : DEFAULT_BASE_URL;
+    }
+
+    // Reads a single key out of ai-healer/config.properties, or returns null if the file doesn't
+    // exist or doesn't set that key. Same read-only, fail-soft shape as HealerConfig's
+    // readProperty, kept separate since that one reads playwright-tests' config.properties, not
+    // this module's own.
+    private static String readFromConfigFile(String propertyKey) {
+        Path configPath = RepoRoot.resolve(HealerOllamaClient.class).resolve(CONFIG_RELATIVE_PATH);
+        if (!Files.exists(configPath)) {
+            return null;
+        }
+        Properties properties = new Properties();
+        try (Reader reader = Files.newBufferedReader(configPath, StandardCharsets.UTF_8)) {
+            properties.load(reader);
+        } catch (IOException e) {
+            return null;
+        }
+        String value = properties.getProperty(propertyKey);
+        return (value != null && !value.isBlank()) ? value.trim() : null;
     }
 
     // Sends the system/user prompt pair to Ollama's /api/chat endpoint and returns the raw

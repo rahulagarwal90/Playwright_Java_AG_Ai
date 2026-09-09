@@ -425,6 +425,7 @@ public class HealOrchestrator {
         sb.append(bar).append('\n');
         sb.append("HEALER RUN SUMMARY").append('\n');
         sb.append(bar).append('\n');
+        sb.append("Model: ").append(HealerOllamaClient.model()).append('\n');
 
         List<HealAttempt> attempts = summary.attempts();
         if (attempts.isEmpty()) {

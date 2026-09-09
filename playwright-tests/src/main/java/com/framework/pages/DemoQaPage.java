@@ -12,8 +12,8 @@ public class DemoQaPage extends BasePage {
     private final String currentAddressInput = "#currentAddress";
     private final String permanentAddressInput = "#permanentAddress";
     private final String submitButton = "#submit";
-    private final String outputName = "#name";
-    private final String webTablesNavLink = "text=Web Tables";
+    private final String outputName = "text=Submit";
+    private final String webTablesNavLink = "text=eb Tables";
 
     public DemoQaPage(Page page) {
         super(page);
