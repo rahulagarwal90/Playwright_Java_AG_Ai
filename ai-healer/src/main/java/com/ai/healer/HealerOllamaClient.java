@@ -51,18 +51,31 @@ public class HealerOllamaClient {
         this.httpClient = httpClient;
     }
 
+    // The resolved model name alongside which of the three tiers actually supplied it - source is
+    // one of "ai-healer/config.properties", "env: OLLAMA_MODEL", or "default", used by
+    // LocatorHealer's heal-trace logging so a run's output says *why* a given model was used, not
+    // just which one.
+    record ResolvedModel(String value, String source) {
+    }
+
     // Resolves the Ollama model to use: ai-healer/config.properties, then OLLAMA_MODEL, then the
     // default. Mirrors ai-reviewer's OllamaConfig.model() resolution order exactly.
     public static String model() {
+        return resolveModel().value();
+    }
+
+    // Package-private: only LocatorHealer's logging needs the source, not model()'s existing
+    // public callers.
+    static ResolvedModel resolveModel() {
         String fromConfigFile = readFromConfigFile("ollama.model");
         if (fromConfigFile != null) {
-            return fromConfigFile;
+            return new ResolvedModel(fromConfigFile, "ai-healer/config.properties");
         }
         String fromEnv = System.getenv("OLLAMA_MODEL");
         if (fromEnv != null && !fromEnv.isBlank()) {
-            return fromEnv;
+            return new ResolvedModel(fromEnv, "env: OLLAMA_MODEL");
         }
-        return DEFAULT_MODEL;
+        return new ResolvedModel(DEFAULT_MODEL, "default");
     }
 
     // Resolves the Ollama base URL: OLLAMA_BASE_URL env var, then the default.

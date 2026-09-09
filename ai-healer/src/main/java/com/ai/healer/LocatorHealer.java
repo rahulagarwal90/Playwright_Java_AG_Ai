@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.reflect.TypeToken;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -98,44 +99,17 @@ public class LocatorHealer {
     private static final Pattern PROJECT_STACK_FRAME =
             Pattern.compile("at com\\.framework\\.[\\w.$]+\\((\\w+\\.java):(\\d+)\\)");
 
-    private static final String SYSTEM_PROMPT = """
-            You are helping repair a broken Playwright Java locator after a browser automation \
-            test failed with a timeout waiting for it. You will be given the broken locator \
-            string, optionally the file and line where it was used, and a list of real DOM \
-            elements captured from the page at the moment of failure (CANDIDATE ELEMENTS).
+    // Mirrors ai-reviewer's OllamaReviewClient/system-prompt.md pattern exactly: the instructions
+    // sent to Ollama live in a packaged resource file, not inline in code, so LocatorHealer's
+    // heal-trace logging can honestly report where the prompt came from (see heal() below).
+    private static final String SYSTEM_PROMPT_RESOURCE_PATH = "/system-prompt.md";
+    private static final String SYSTEM_PROMPT = loadSystemPromptTemplate();
 
-            Suggest ONE replacement bare selector value - not a Java statement, just the raw \
-            selector text a page object would store in a field and later pass to \
-            page.click(selector)/page.locator(selector) (e.g. "#id", "[data-test='x']", \
-            ".some-class", "text=Some Text") - that targets one of the CANDIDATE ELEMENTS.
-
-            Rules:
-            - You MUST base the replacement only on an id, data-test/data-testid attribute value, \
-            role, aria label, or text value that appears EXACTLY in the candidate list below. \
-            Never invent, guess, or slightly modify a value that isn't shown there.
-            - A candidate's data-test/data-testid value came from a real HTML attribute named \
-            EITHER data-test OR data-testid - never an attribute literally named "testId". If you \
-            build an attribute selector from it, use the real attribute name, e.g. \
-            [data-test='value'], NOT [testId='value'] (which does not exist on the real page and \
-            would match nothing).
-            - matchedElement must name which candidate element (by its listed id/data-test-or-\
-            data-testid/role/text) the suggestion is based on.
-            - Multiple elements may share the same property - the candidate list marks a value \
-            [NOT UNIQUE] whenever more than one candidate shares it. A locator built from a \
-            [NOT UNIQUE] text, role, or aria value could match more than one element on the real \
-            page, not just the one you intend. When that's the case, prefer a candidate's id or \
-            data-test/data-testid value instead, since those identify one specific element; note \
-            the ambiguity explicitly in matchedElement whenever you rely on or deliberately avoid \
-            a [NOT UNIQUE] property.
-            - If the only candidates matching the broken locator's intent share a [NOT UNIQUE] \
-            property and none of them has a unique id or data-test/data-testid value, set \
-            confidence to "low" and say so explicitly in matchedElement, rather than arbitrarily \
-            picking one of them.
-            - If no candidate looks like a plausible replacement for the broken locator, still \
-            return your best guess built only from listed values, and set confidence to "low". \
-            Set confidence to "high" only when a candidate clearly corresponds to the broken \
-            locator's intent.
-            """;
+    // Enables the verbose diagnostic dump (full system/user prompt text, raw Ollama response JSON)
+    // that used to print unconditionally on every heal() call, cluttering the terminal. Off by
+    // default; opt in with -Dhealer.verbose=true, same system-property-flag convention already
+    // used for healer.skipArtifactCleanup/healer.minReportTimestamp.
+    private static final boolean VERBOSE = Boolean.getBoolean("healer.verbose");
 
     private final HealerOllamaClient ollamaClient;
     private final Gson gson = new Gson();
@@ -155,13 +129,31 @@ public class LocatorHealer {
 
         String userPrompt = buildUserPrompt(brokenLocator, fileLineContext, candidates);
 
-        LOGGER.info("LocatorHealer system prompt:\n" + SYSTEM_PROMPT);
-        LOGGER.info("LocatorHealer user prompt:\n" + userPrompt);
+        // A clean, narrated trace of what's about to happen and what came back - printed via
+        // System.out (not LOGGER) for the same reason HealOrchestrator's run summary is: no
+        // per-line timestamp/class-name prefix cluttering the output. The full prompt text and raw
+        // response JSON these lines summarize are still available, just gated behind VERBOSE below
+        // instead of dumped unconditionally.
+        HealerOllamaClient.ResolvedModel model = HealerOllamaClient.resolveModel();
+        System.out.println("[HEAL] Model: " + model.value() + " (from " + model.source() + ")");
+        System.out.println("[HEAL] System prompt loaded from: classpath:" + SYSTEM_PROMPT_RESOURCE_PATH);
+        System.out.println("[HEAL] DOM snapshot loaded from: " + failure.domSnapshotPath
+                + " (" + candidates.size() + " candidate elements)");
+        if (VERBOSE) {
+            LOGGER.info("LocatorHealer system prompt:\n" + SYSTEM_PROMPT);
+            LOGGER.info("LocatorHealer user prompt:\n" + userPrompt);
+        }
+        System.out.println("[HEAL] Sending diagnosis request to Ollama...");
 
         String responseJson = ollamaClient.suggestLocator(SYSTEM_PROMPT, userPrompt);
-        LOGGER.info("LocatorHealer raw Ollama response:\n" + responseJson);
+        if (VERBOSE) {
+            LOGGER.info("LocatorHealer raw Ollama response:\n" + responseJson);
+        }
 
         HealResult result = parseResult(responseJson);
+        System.out.println("[HEAL] Response: newSelector=\"" + result.newSelector + "\", matchedElement=\""
+                + result.matchedElement + "\", confidence=\"" + result.confidence + "\"");
+
         result.brokenLocator = brokenLocator;
         PageObjectLocation location = extractPageObjectLocation(failure.stackTrace, brokenLocator);
         if (location != null) {
@@ -170,6 +162,21 @@ public class LocatorHealer {
             result.fieldName = location.fieldName();
         }
         return result;
+    }
+
+    // Reads the fixed locator-repair instructions out of the packaged system-prompt.md resource
+    // file - mirrors ai-reviewer's OllamaReviewClient.loadSystemPromptTemplate() exactly. Loaded
+    // once at class-init time: unlike ai-reviewer's version, nothing here splices per-request
+    // content into it, so there's no reason to re-read the file on every heal() call.
+    private static String loadSystemPromptTemplate() {
+        try (InputStream in = LocatorHealer.class.getResourceAsStream(SYSTEM_PROMPT_RESOURCE_PATH)) {
+            if (in == null) {
+                throw new IllegalStateException("Missing classpath resource: " + SYSTEM_PROMPT_RESOURCE_PATH);
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to load LocatorHealer system prompt template", e);
+        }
     }
 
     private static String extractBrokenLocator(TestFailure failure) {
