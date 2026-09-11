@@ -11,12 +11,12 @@ import java.nio.file.Path;
  * path) instead of each duplicating the walk-up logic. Mirrors ai-reviewer's ModuleRoot, kept
  * self-contained here since ai-healer has no dependency on the ai-reviewer module.
  */
-final class RepoRoot {
+public final class RepoRoot {
 
     private RepoRoot() {
     }
 
-    static Path resolve(Class<?> anchorClass) {
+    public static Path resolve(Class<?> anchorClass) {
         try {
             Path codeSource = Path.of(anchorClass.getProtectionDomain().getCodeSource().getLocation().toURI());
             Path candidate = Files.isDirectory(codeSource) ? codeSource : codeSource.getParent();

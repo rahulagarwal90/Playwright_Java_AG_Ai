@@ -1,4 +1,4 @@
-package com.ai.healer;
+package com.ai.healer.exec;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit;
  * Factored out of {@link HealOrchestrator} so {@link TestRunAndHeal}'s full-suite run doesn't
  * duplicate that plumbing.
  */
-final class MavenRunner {
+public final class MavenRunner {
 
     private MavenRunner() {
     }
@@ -21,14 +21,14 @@ final class MavenRunner {
     // Runs to completion with no watchdog - for a manual, attended invocation (TestRunAndHeal's
     // full-suite run) where a human is watching the live output via inheritIO() and can interrupt
     // it themselves if something hangs, the same as running `mvn ...` directly in a terminal.
-    static int run(Path repoRoot, List<String> mavenArgs) throws IOException, InterruptedException {
+    public static int run(Path repoRoot, List<String> mavenArgs) throws IOException, InterruptedException {
         return start(repoRoot, mavenArgs).waitFor();
     }
 
     // Runs with a watchdog timeout - for an unattended re-run inside HealOrchestrator's retry
     // loop, where nothing but this code is watching the process, so a genuinely hung subprocess
     // (e.g. a browser that never launches) has to be killed rather than blocking forever.
-    static int run(Path repoRoot, List<String> mavenArgs, long waitTimeoutMs) throws IOException, InterruptedException {
+    public static int run(Path repoRoot, List<String> mavenArgs, long waitTimeoutMs) throws IOException, InterruptedException {
         Process process = start(repoRoot, mavenArgs);
         boolean finished = process.waitFor(waitTimeoutMs, TimeUnit.MILLISECONDS);
         if (!finished) {

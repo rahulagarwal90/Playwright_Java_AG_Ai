@@ -1,5 +1,8 @@
-package com.ai.healer;
+package com.ai.healer.ollama;
 
+import com.ai.healer.RepoRoot;
+import com.ai.healer.report.DomElement;
+import com.ai.healer.report.TestFailure;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.reflect.TypeToken;
@@ -57,9 +60,10 @@ public class LocatorHealer {
 
     // A resolved (source file, line number, field name) pointing at a page object's locator
     // field. fieldName is null when lineNumber falls back to the call-site line rather than a
-    // resolved field declaration. Package-private (not private) so tests can exercise the
-    // resolution logic directly.
-    record PageObjectLocation(Path filePath, int lineNumber, String fieldName) {
+    // resolved field declaration. Public (was package-private before the com.ai.healer.ollama
+    // package split) so LocatorHealerTest, which stays at top-level com.ai.healer, can exercise
+    // the resolution logic directly.
+    public record PageObjectLocation(Path filePath, int lineNumber, String fieldName) {
     }
 
     // Group 1 is the wrapping quote character Playwright used (every real call log we've
@@ -188,11 +192,12 @@ public class LocatorHealer {
         return locator;
     }
 
-    // Package-private, null-safe variant HealOrchestrator uses to compare a fresh re-run failure's
+    // Public (was package-private before the com.ai.healer.ollama package split), null-safe
+    // variant HealOrchestrator (top-level com.ai.healer) uses to compare a fresh re-run failure's
     // locator against a just-applied patch - unlike extractBrokenLocator, doesn't require the
     // failure to actually be locator-shaped (a fresh failure might not be, if the patch fixed the
     // locator problem but something else now fails).
-    static String tryExtractBrokenLocator(TestFailure failure) {
+    public static String tryExtractBrokenLocator(TestFailure failure) {
         String message = failure.failureMessage == null ? "" : failure.failureMessage;
         Matcher matcher = LOCATOR_IN_CALL_LOG.matcher(message);
         if (matcher.find()) {
@@ -236,9 +241,10 @@ public class LocatorHealer {
         return extractPageObjectLocation(stackTrace, brokenLocator, RepoRoot.resolve(LocatorHealer.class));
     }
 
-    // Package-private overload so tests can point resolution at a temp directory instead of the
-    // real repo root, without depending on whatever this repo's real page objects currently hold.
-    static PageObjectLocation extractPageObjectLocation(String stackTrace, String brokenLocator, Path repoRoot) {
+    // Public (was package-private before the com.ai.healer.ollama package split) overload so
+    // LocatorHealerTest can point resolution at a temp directory instead of the real repo root,
+    // without depending on whatever this repo's real page objects currently hold.
+    public static PageObjectLocation extractPageObjectLocation(String stackTrace, String brokenLocator, Path repoRoot) {
         if (stackTrace == null) {
             return null;
         }

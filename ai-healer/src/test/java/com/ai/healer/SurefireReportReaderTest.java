@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.ai.healer.report.SurefireReportReader;
+import com.ai.healer.report.TestFailure;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;

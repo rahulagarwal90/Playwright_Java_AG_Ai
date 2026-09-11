@@ -1,5 +1,7 @@
-package com.ai.healer;
+package com.ai.healer.report;
 
+import com.ai.healer.RepoRoot;
+import com.ai.healer.ScenarioNameSanitizer;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -36,8 +38,9 @@ public class SurefireReportReader {
     // earlier, unrelated run can't be silently processed as though it belongs to this invocation.
     // Optional: when unset, whatever report is currently on disk is trusted as-is (e.g. a direct
     // `mvn -pl ai-healer exec:java` invocation has no "current invocation" to compare against).
-    // Package-private (not private) so TestRunAndHeal can set it without duplicating the literal.
-    static final String MIN_REPORT_TIMESTAMP_PROPERTY = "healer.minReportTimestamp";
+    // Public (was package-private before the com.ai.healer.report package split) so TestRunAndHeal,
+    // which stays at top-level com.ai.healer, can set it without duplicating the literal.
+    public static final String MIN_REPORT_TIMESTAMP_PROPERTY = "healer.minReportTimestamp";
 
     private final Path surefireReportsDir;
     private final Path domSnapshotsDir;

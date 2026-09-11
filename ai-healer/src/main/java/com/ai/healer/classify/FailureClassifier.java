@@ -1,5 +1,6 @@
-package com.ai.healer;
+package com.ai.healer.classify;
 
+import com.ai.healer.report.TestFailure;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 

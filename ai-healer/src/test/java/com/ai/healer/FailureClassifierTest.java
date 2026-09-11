@@ -2,7 +2,9 @@ package com.ai.healer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import com.ai.healer.FailureClassifier.Classification;
+import com.ai.healer.classify.FailureClassifier;
+import com.ai.healer.classify.FailureClassifier.Classification;
+import com.ai.healer.report.TestFailure;
 import org.junit.jupiter.api.Test;
 
 public class FailureClassifierTest {

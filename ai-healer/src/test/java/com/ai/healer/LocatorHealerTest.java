@@ -8,6 +8,9 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.ai.healer.ollama.HealerOllamaClient;
+import com.ai.healer.ollama.LocatorHealer;
+import com.ai.healer.report.TestFailure;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;

@@ -1,4 +1,4 @@
-package com.ai.healer;
+package com.ai.healer.report;
 
 /**
  * Plain data holder for one entry in a Hooks-captured DOM snapshot JSON array — nothing else. No

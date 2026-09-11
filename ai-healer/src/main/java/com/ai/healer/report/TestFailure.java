@@ -1,4 +1,4 @@
-package com.ai.healer;
+package com.ai.healer.report;
 
 import java.nio.file.Path;
 

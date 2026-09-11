@@ -1,5 +1,12 @@
 package com.ai.healer;
 
+import com.ai.healer.classify.FailureClassifier;
+import com.ai.healer.exec.MavenRunner;
+import com.ai.healer.ollama.HealerOllamaClient;
+import com.ai.healer.ollama.LocatorHealer;
+import com.ai.healer.patch.PageObjectPatcher;
+import com.ai.healer.report.SurefireReportReader;
+import com.ai.healer.report.TestFailure;
 import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;

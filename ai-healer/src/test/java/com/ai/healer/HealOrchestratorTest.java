@@ -10,6 +10,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ai.healer.ollama.LocatorHealer;
+import com.ai.healer.patch.PageObjectPatcher;
+import com.ai.healer.report.SurefireReportReader;
+import com.ai.healer.report.TestFailure;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
