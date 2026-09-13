@@ -45,6 +45,36 @@ TestRunAndHeal runs the full suite first, then hands off to HealOrchestrator on 
 MavenRunner and RepoRoot are the subprocess/path-resolution plumbing several classes share.
 ```
 
+## Class summary
+
+One row per class, old and new. The detailed sections below cover the original ones in depth;
+the newer ones (feature-file grouping, the pipeline-context git/PR flow, and the run report) are
+described here and in `CLAUDE.md`'s `ai-healer` section, not yet expanded into their own
+three-question sections below.
+
+| Package | Class | One-sentence purpose |
+|---|---|---|
+| `com.ai.healer` | `ScenarioNameSanitizer` | The one shared filename-safe transformation applied to a Cucumber scenario name, used by both `playwright-tests`' `Hooks` and `SurefireReportReader` so a DOM snapshot filename can never drift out of sync with the failure it belongs to. |
+| `com.ai.healer` | `RepoRoot` | Finds the repository root by walking up from wherever the calling class was loaded, so file paths resolve correctly regardless of the JVM's working directory. |
+| `com.ai.healer` | `HealerConfig` | Resolves `ai.healer.maxRetriesPerScenario` (the per-scenario heal-attempt budget) and `playwright.timeout`, each via its own three-tier config lookup. |
+| `com.ai.healer` | `HealOrchestrator` | Runs the whole heal chain end to end — reads failures, groups them by feature file, classifies, heals/patches/re-runs each scenario within its own retry budget, and (in pipeline context) branches, PRs, and comments on the result. |
+| `com.ai.healer` | `TestRunAndHeal` | The one-click entry point: runs the full test suite, and only on failure hands off to `HealOrchestrator` in the same JVM. |
+| `com.ai.healer.report` | `SurefireReportReader` | Reads failed testcases out of Surefire's XML reports and matches each to its captured DOM snapshot. |
+| `com.ai.healer.report` | `TestFailure` | Plain data holder for one failed Surefire testcase. |
+| `com.ai.healer.report` | `DomElement` | Plain data holder for one interactive element out of a captured DOM snapshot. |
+| `com.ai.healer.report` | `FeatureFileResolver` | Matches a Surefire testcase's classname (a Cucumber feature's "Feature:" line) back to the real `.feature` file it came from, reporting a miss with diagnostics instead of throwing. |
+| `com.ai.healer.report` | `ScenarioGroup` | One `.feature` file's path plus every scenario failure that belongs to it, and the flat branch-safe name derived from that file's name. |
+| `com.ai.healer.classify` | `FailureClassifier` | Pure deterministic pattern matching that decides whether a failure looks like a broken locator (`LOCATOR_FAILURE`) or a real defect (`NOT_FIXABLE`) — no AI involved. |
+| `com.ai.healer.ollama` | `LocatorHealer` | Builds the case for one broken locator (extracts it, loads the DOM snapshot, gathers file/line context) and asks Ollama for a replacement selector. |
+| `com.ai.healer.ollama` | `HealerOllamaClient` | The self-contained HTTP client that actually calls Ollama's `/api/chat` endpoint with a structured-output schema. |
+| `com.ai.healer.patch` | `PageObjectPatcher` | Applies one healed selector to a page object source file with a minimal, surgical string-literal swap — never runs tests or touches git. |
+| `com.ai.healer.exec` | `MavenRunner` | Shared `mvn` subprocess launcher, with and without a watchdog timeout. |
+| `com.ai.healer.github` | `HealerGitClient` | Creates a new branch off HEAD, stages a healed group's changed files, commits, and pushes it to origin — plain `git` subprocess calls, never touches `main` directly. |
+| `com.ai.healer.github` | `HealerGitHubConfig` | Resolves the GitHub repository/API base (mirroring `ai-reviewer`'s `GitHubContext`) and a new, separate `ai.healer.github.token`/`AI_HEALER_GITHUB_TOKEN` used only by ai-healer's own pipeline git/PR flow. |
+| `com.ai.healer.github` | `HealerPullRequestCreator` | Opens a GitHub PR from the branch `HealerGitClient` just pushed, targeting `main` — creation only, never merges or approves. |
+| `com.ai.healer.github` | `NotFixablePrCommenter` | Posts one PR comment per `NOT_FIXABLE` failure encountered while processing a group that got a PR. |
+| `com.ai.healer.output` | `HealerRunReport` | Writes a single flat JSON file summarizing one run — what was healed per feature file, `NOT_FIXABLE` entries not otherwise posted to a PR, and any unresolved-feature diagnostics. |
+
 ---
 
 ## ScenarioNameSanitizer

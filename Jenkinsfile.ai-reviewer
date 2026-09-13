@@ -12,7 +12,7 @@ pipeline {
         
         // Populate standard GitHub PR context variables for local git code reviewer.
         // Jenkins Multibranch Pipelines automatically inject CHANGE_ID, CHANGE_URL, and CHANGE_AUTHOR.
-        GITHUB_REPOSITORY = "rahulagarwal90/Playwright_Java_AG_AiReviewer"
+        GITHUB_REPOSITORY = "rahulagarwal90/Playwright_Java_AG_Ai"
         GITHUB_PR_NUMBER  = "${env.CHANGE_ID}"
         // Name of the regression pipeline job to trigger after PR AI review runs.
         REGRESSION_JOB_NAME = 'playwright-regression-suite'

@@ -5,13 +5,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ai.healer.github.HealerGitClient;
+import com.ai.healer.github.HealerPullRequestCreator;
+import com.ai.healer.github.NotFixablePrCommenter;
 import com.ai.healer.ollama.LocatorHealer;
 import com.ai.healer.patch.PageObjectPatcher;
+import com.ai.healer.report.FeatureFileResolver;
 import com.ai.healer.report.SurefireReportReader;
 import com.ai.healer.report.TestFailure;
 import java.nio.charset.StandardCharsets;
@@ -30,6 +35,7 @@ public class HealOrchestratorTest {
         SurefireReportReader reader = mock(SurefireReportReader.class);
         TestFailure notFixable = new TestFailure();
         notFixable.testName = "Some assertion failure";
+        notFixable.className = "User Login Flow";
         notFixable.failureType = "org.opentest4j.AssertionFailedError";
         notFixable.failureMessage = "expected: <a> but was: <b>";
         when(reader.readFailures()).thenReturn(List.of(notFixable));
@@ -47,29 +53,53 @@ public class HealOrchestratorTest {
         verify(locatorHealer, never()).heal(any());
     }
 
+    // Pipeline context now heals/patches/re-runs exactly the same way local context does (see
+    // localContextHealsWhenPatchAppliesAndRerunPasses below) - the only thing that differs is
+    // what happens AFTERWARD: a healed group gets its changes pushed to a branch and opened as a
+    // PR (HealerGitClient/HealerPullRequestCreator) instead of being left as an uncommitted local
+    // change. This replaces the old "pipeline context only logs a suggestion, never patches"
+    // test - that behavior no longer exists now that there's somewhere for a pipeline-context
+    // patch to go (a PR) instead of an uncommitted local file.
     @Test
-    void pipelineContextOnlyLogsTheSuggestionAndNeverPatchesOrReruns(@TempDir Path tempDir) throws Exception {
+    void pipelineContextHealsPatchesAndRerunsThenOpensAPrForTheHealedGroup(@TempDir Path tempDir) throws Exception {
+        Path pageFile = tempDir.resolve("LoginPage.java");
+        Files.writeString(pageFile, "private final String loginButton = \"#login-button-BROKEN\";\n", StandardCharsets.UTF_8);
+
         SurefireReportReader reader = mock(SurefireReportReader.class);
         TestFailure failure = locatorFailure("#login-button-BROKEN");
         when(reader.readFailures()).thenReturn(List.of(failure));
 
         LocatorHealer locatorHealer = mock(LocatorHealer.class);
-        LocatorHealer.HealResult healResult = healResult("#login-button-BROKEN", "#login-button", tempDir.resolve("LoginPage.java"), 13);
+        LocatorHealer.HealResult healResult = healResult("#login-button-BROKEN", "#login-button", pageFile, 1);
         when(locatorHealer.heal(failure)).thenReturn(healResult);
 
-        PageObjectPatcher patcher = mock(PageObjectPatcher.class);
-        HealOrchestrator.ScenarioRerunner rerunner = mock(HealOrchestrator.ScenarioRerunner.class);
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+
+        HealerGitClient gitClient = mock(HealerGitClient.class);
+        HealerGitClient.BranchResult branch = new HealerGitClient.BranchResult("heal/login-feature-20260101-000000");
+        when(gitClient.commitAndPushHealedGroup(any(), any(), any())).thenReturn(branch);
+
+        HealerPullRequestCreator pullRequestCreator = mock(HealerPullRequestCreator.class);
+        HealerPullRequestCreator.PullRequest pullRequest =
+                new HealerPullRequestCreator.PullRequest(42, "https://github.com/example/repo/pull/42");
+        when(pullRequestCreator.createPullRequest(eq(branch.branchName()), any(), any())).thenReturn(pullRequest);
+
+        NotFixablePrCommenter commenter = mock(NotFixablePrCommenter.class);
 
         HealOrchestrator orchestrator = new HealOrchestrator(
-                reader, locatorHealer, patcher, rerunner, true, DEFAULT_MAX_RETRIES);
+                reader, locatorHealer, realPatcher, name -> null, true, DEFAULT_MAX_RETRIES,
+                new FeatureFileResolver(), gitClient, pullRequestCreator, commenter);
 
         List<HealOrchestrator.Result> results = orchestrator.run();
 
-        assertEquals(1, results.size());
-        assertEquals(HealOrchestrator.Outcome.SUGGESTION_LOGGED, results.get(0).outcome);
-        assertTrue(results.get(0).healedAndKept.isEmpty());
-        verify(patcher, never()).patch(any(), anyInt(), any());
-        verify(rerunner, never()).rerun(anyString());
+        assertEquals(HealOrchestrator.Outcome.HEALED, results.get(0).outcome);
+        assertEquals(List.of("LoginPage.java:1 \"#login-button-BROKEN\" -> \"#login-button\""), results.get(0).healedAndKept);
+        assertEquals("private final String loginButton = \"#login-button\";\n",
+                Files.readString(pageFile, StandardCharsets.UTF_8));
+
+        verify(gitClient).commitAndPushHealedGroup(any(), eq(List.of(pageFile)), any());
+        verify(pullRequestCreator).createPullRequest(eq(branch.branchName()), any(), any());
+        verify(commenter, never()).postNotFixableComments(anyInt(), any());
     }
 
     @Test
@@ -327,7 +357,7 @@ public class HealOrchestratorTest {
 
         String rendered = HealOrchestrator.buildSummary(orchestrator.runWithSummary());
 
-        assertTrue(rendered.contains("RESULT: 1 of 1 attempt succeeded, retry budget (maxRetries=1) reached."),
+        assertTrue(rendered.contains("RESULT: 1 of 1 attempt succeeded, retry budget (maxRetriesPerScenario=1) reached."),
                 "rendered summary was:\n" + rendered);
         assertTrue(rendered.contains("re-run this command again to continue healing further"),
                 "rendered summary was:\n" + rendered);
@@ -338,6 +368,7 @@ public class HealOrchestratorTest {
         SurefireReportReader reader = mock(SurefireReportReader.class);
         TestFailure notFixable = new TestFailure();
         notFixable.testName = "Some assertion failure";
+        notFixable.className = "User Login Flow";
         notFixable.failureType = "org.opentest4j.AssertionFailedError";
         notFixable.failureMessage = "expected: <a> but was: <b>";
         when(reader.readFailures()).thenReturn(List.of(notFixable));
@@ -351,9 +382,15 @@ public class HealOrchestratorTest {
         assertTrue(rendered.contains("NOT_FIXABLE"), "rendered summary was:\n" + rendered);
     }
 
+    // testName/className are a real scenario from a real feature file in this repo
+    // (playwright-tests/src/test/resources/features/saucedemo/login/login.feature) so the
+    // default FeatureFileResolver() the 6-arg HealOrchestrator constructor wires up (which scans
+    // the real repo, not a fixture) resolves this failure to a real ScenarioGroup instead of an
+    // "unresolved feature."
     private static TestFailure locatorFailure(String brokenLocator) {
         TestFailure failure = new TestFailure();
         failure.testName = "Standard User can login successfully";
+        failure.className = "User Login Flow";
         failure.failureType = "com.microsoft.playwright.TimeoutError";
         failure.failureMessage = "Call log:\n- waiting for locator(\"" + brokenLocator + "\")\n";
         failure.domSnapshotFound = true;

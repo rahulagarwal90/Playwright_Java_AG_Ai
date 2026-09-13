@@ -2,9 +2,15 @@ package com.ai.healer;
 
 import com.ai.healer.classify.FailureClassifier;
 import com.ai.healer.exec.MavenRunner;
+import com.ai.healer.github.HealerGitClient;
+import com.ai.healer.github.HealerPullRequestCreator;
+import com.ai.healer.github.NotFixablePrCommenter;
 import com.ai.healer.ollama.HealerOllamaClient;
 import com.ai.healer.ollama.LocatorHealer;
+import com.ai.healer.output.HealerRunReport;
 import com.ai.healer.patch.PageObjectPatcher;
+import com.ai.healer.report.FeatureFileResolver;
+import com.ai.healer.report.ScenarioGroup;
 import com.ai.healer.report.SurefireReportReader;
 import com.ai.healer.report.TestFailure;
 import java.io.IOException;
@@ -13,19 +19,26 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
 /**
- * Runs the whole Healer chain end to end: reads failures (SurefireReportReader), classifies each
- * (FailureClassifier), and for every LOCATOR_FAILURE asks LocatorHealer for a fix. In a local
- * checkout it goes further - applies the fix (PageObjectPatcher), re-runs just that one scenario
- * to verify, and only reverts the file if the re-run still fails at the SAME locator. In a GitHub
- * PR pipeline context it stops after producing the suggestion: never patches a file or re-runs
- * tests there, matching the "suggestion only" design CI needs. Never touches git, ever - a fix
- * that sticks is left as an uncommitted change for a human to review and commit themselves.
+ * Runs the whole Healer chain end to end: reads failures (SurefireReportReader), groups them by
+ * feature file (FeatureFileResolver/ScenarioGroup), classifies each (FailureClassifier), and for
+ * every LOCATOR_FAILURE asks LocatorHealer for a fix, applies it (PageObjectPatcher), and re-runs
+ * just that one scenario to verify - reverting only if the re-run still fails at the exact same
+ * locator. This now happens the same way in BOTH a local checkout and a GitHub PR pipeline
+ * context: what differs between them is what happens to a healed group's changes AFTERWARD. In a
+ * local checkout, a kept patch is simply left as an uncommitted change for a human to review and
+ * commit themselves - HealOrchestrator never touches git there. In a GitHub PR pipeline context,
+ * every ScenarioGroup that healed at least one failure gets its own branch + PR
+ * (HealerGitClient/HealerPullRequestCreator), with any NOT_FIXABLE failures in that same group
+ * posted as PR comments (NotFixablePrCommenter) instead of sitting only in the run report. Either
+ * way, a HealerRunReport JSON file is written at the very end summarizing the whole run.
  *
  * A single scenario can have more than one broken locator, and Cucumber only ever reports the
  * first one it hits - fixing it can unmask a second failure that was previously hidden behind it.
@@ -33,10 +46,13 @@ import java.util.logging.Logger;
  * *different* locator), HealOrchestrator compares the fresh post-re-run failure's locator against
  * the one it just patched: same locator means the fix didn't work and gets reverted; a different
  * locator (or a failure that isn't locator-shaped at all) means the fix was fine and gets kept,
- * and the newly-unmasked failure is chased in turn - up to `ai.healer.maxRetries` heal attempts
- * total per `run()` invocation (a global budget across every failure processed, not per-failure).
- * Once that budget is exhausted, healing stops and the result records which locators were healed
- * and kept, and a plain-English note on whatever's left. (An earlier version reverted on *any*
+ * and the newly-unmasked failure is chased in turn - up to `ai.healer.maxRetriesPerScenario` heal
+ * attempts for THAT scenario (a budget per scenario - see HealerConfig.maxRetriesPerScenario() -
+ * not a single pool shared across every failure in the run: each original Surefire failure gets
+ * its own fresh budget, whether or not it shares a feature file/ScenarioGroup with others). Once a
+ * scenario's own budget is exhausted, that scenario's result records which locators were healed
+ * and kept plus a plain-English note on whatever's left, and processing moves on to the next
+ * scenario/group - it does not stop the whole run. (An earlier version reverted on *any*
  * still-failing re-run, which meant a second invocation could never make progress on a
  * multi-locator scenario - see ARCHITECTURE_EXPLAINED.md for that real experiment.)
  */
@@ -54,11 +70,9 @@ public class HealOrchestrator {
         // LocatorHealer couldn't resolve a patchable file/line, or PageObjectPatcher refused, and
         // the scenario is still failing.
         PATCH_REFUSED,
-        // The global heal-attempt budget ran out before this scenario fully passed - may still
-        // have made partial progress (see Result.healedAndKept).
+        // This scenario's own heal-attempt budget ran out before it fully passed - may still have
+        // made partial progress (see Result.healedAndKept).
         MAX_RETRIES_EXCEEDED,
-        // Pipeline context: a suggestion was produced and logged; nothing was applied or re-run.
-        SUGGESTION_LOGGED,
         // FailureClassifier said this isn't a locator problem.
         NOT_FIXABLE,
         // Something threw while healing (Ollama unreachable, no DOM snapshot, re-run couldn't
@@ -72,34 +86,64 @@ public class HealOrchestrator {
         // Human-readable "file:line \"old\" -> \"new\"" entries, in the order they were applied
         // and kept, for every locator that genuinely got fixed while processing this failure.
         public final List<String> healedAndKept;
+        // The real source file paths behind healedAndKept, same order, deduplicated - what
+        // HealerGitClient stages and HealerRunReport/buildSummary's file list are both built from.
+        public final List<Path> changedFiles;
         // Plain-English detail: why a failure remains, why a patch was reverted, or context for
-        // an already-passing/suggestion-only result. Empty string if there's nothing to add.
+        // an already-passing result. Empty string if there's nothing to add.
         public final String note;
 
-        Result(TestFailure originalFailure, Outcome outcome, List<String> healedAndKept, String note) {
+        Result(TestFailure originalFailure, Outcome outcome, List<String> healedAndKept, List<Path> changedFiles,
+                String note) {
             this.originalFailure = originalFailure;
             this.outcome = outcome;
             this.healedAndKept = healedAndKept;
+            this.changedFiles = changedFiles;
             this.note = note;
         }
     }
 
-    // One recorded heal attempt for the end-of-run human-readable summary. Every "unit" of the
-    // maxRetries budget that gets consumed - i.e. every call to locatorHealer.heal() inside
-    // healWithRetryChain, whether it ultimately succeeds or not - becomes exactly one of these,
-    // in the order attempts actually happened. Deliberately flat and separate from Result (which
-    // groups outcomes by *original* Surefire failure, not by individual attempt): a scenario with
-    // a masked chain of three locators produces one Result but three HealAttempts, and that's
-    // exactly the distinction the summary needs to show "Attempt N/maxRetries" correctly.
+    // One recorded heal attempt for the end-of-run human-readable summary. Every "unit" of a
+    // scenario's own maxRetriesPerScenario budget that gets consumed - i.e. every call to
+    // locatorHealer.heal() inside healWithRetryChain, whether it ultimately succeeds or not -
+    // becomes exactly one of these, in the order attempts actually happened. Deliberately flat
+    // and separate from Result (which groups outcomes by *original* Surefire failure, not by
+    // individual attempt): a scenario with a masked chain of three locators produces one Result
+    // but three HealAttempts, and that's exactly the distinction the summary needs to show
+    // "Attempt N/maxRetriesPerScenario" correctly.
     public record HealAttempt(int attemptNumber, boolean succeeded, String label, String description) {
     }
 
+    // One .feature file's ScenarioGroup together with the Results/HealAttempts produced while
+    // processing every scenario failure inside it - the unit the pipeline-context git/PR wiring
+    // and HealerRunReport both key off of.
+    public record GroupOutcome(ScenarioGroup group, List<Result> results, List<HealAttempt> attempts) {
+    }
+
+    // One Surefire classname (a Cucumber feature name) that FeatureFileResolver could not match
+    // to any real .feature file. Carries every failure that would have belonged to this group,
+    // plus FeatureFileResolver's own diagnostic detail, so a caller (HealerRunReport) can report
+    // the miss without re-scanning anything itself. These failures are never processed - see
+    // FeatureFileResolver's javadoc and runWithSummary() below.
+    public record UnresolvedFeature(String className, int featureFilesScanned, List<Path> allFeatureFilePaths,
+            List<TestFailure> failures) {
+    }
+
+    // Pipeline-context-only: the branch/PR HealerGitClient and HealerPullRequestCreator created
+    // for one ScenarioGroup's healed changes. Absent (not present in the map runWithSummary()
+    // builds) for any group that healed nothing, or that isn't being processed in pipeline
+    // context at all (a local checkout never creates one).
+    public record PrOutcome(String branchName, int pullRequestNumber, String pullRequestUrl) {
+    }
+
     // Bundles what run() already returns (List<Result>) together with the flat attempt log the
-    // human-readable summary is built from, plus the maxRetries value the summary reports
-    // against. run() itself still returns just List<Result> (unchanged, so existing callers and
-    // tests don't need to know this exists) - runWithSummary() is the richer entry point
-    // TestRunAndHeal/main() use to print the summary.
-    public record RunSummary(List<Result> results, List<HealAttempt> attempts, int maxRetries) {
+    // human-readable summary is built from, the per-group breakdown, and any unresolved-feature
+    // diagnostics - plus the maxRetriesPerScenario value the summary reports against. run() itself
+    // still returns just List<Result> (unchanged, so existing callers and tests don't need to
+    // know this exists) - runWithSummary() is the richer entry point TestRunAndHeal/main() use to
+    // print the summary and drive the pipeline-context git/PR wiring.
+    public record RunSummary(List<Result> results, List<HealAttempt> attempts, int maxRetries,
+            List<GroupOutcome> groupOutcomes, List<UnresolvedFeature> unresolvedFeatures) {
     }
 
     // Re-runs exactly one Cucumber scenario by name and reports how it went: null if it passed,
@@ -117,6 +161,10 @@ public class HealOrchestrator {
     private final ScenarioRerunner rerunner;
     private final boolean pipelineContext;
     private final int maxRetries;
+    private final FeatureFileResolver featureFileResolver;
+    private final HealerGitClient gitClient;
+    private final HealerPullRequestCreator pullRequestCreator;
+    private final NotFixablePrCommenter notFixablePrCommenter;
 
     public HealOrchestrator() {
         this(new SurefireReportReader(),
@@ -124,21 +172,43 @@ public class HealOrchestrator {
                 new PageObjectPatcher(),
                 HealOrchestrator::runScenarioViaMaven,
                 isPipelineContext(),
-                HealerConfig.maxRetries());
+                HealerConfig.maxRetriesPerScenario(),
+                new FeatureFileResolver(),
+                new HealerGitClient(),
+                new HealerPullRequestCreator(HttpClient.newHttpClient()),
+                new NotFixablePrCommenter(HttpClient.newHttpClient()));
     }
 
     // Package-private, fully injectable constructor so tests can exercise the branching logic
-    // (NOT_FIXABLE handling, pipeline vs. local, revert-vs-keep, retry budget) without a real
-    // Ollama call, a real file, a real Maven subprocess, or depending on the real config file to
-    // test the retry-budget boundary.
+    // (NOT_FIXABLE handling, revert-vs-keep, per-scenario retry budget) without a real Ollama
+    // call, a real file, a real Maven subprocess, or depending on the real config file to test
+    // the retry-budget boundary. Defaults to a FeatureFileResolver over the real repo's feature
+    // files (this module's tests already run inside the real checkout, and the fixture scenario
+    // name used throughout HealOrchestratorTest is a real scenario in a real feature file - see
+    // that test's locatorFailure() helper) and to no git/PR collaborators, since none of the
+    // existing local-context (pipelineContext=false) tests ever reach that code path.
     HealOrchestrator(SurefireReportReader reportReader, LocatorHealer locatorHealer, PageObjectPatcher patcher,
             ScenarioRerunner rerunner, boolean pipelineContext, int maxRetries) {
+        this(reportReader, locatorHealer, patcher, rerunner, pipelineContext, maxRetries,
+                new FeatureFileResolver(), null, null, null);
+    }
+
+    // Full constructor - additionally takes the feature-file resolver and the pipeline-context
+    // git/PR collaborators, for tests that exercise the grouping/wiring logic directly.
+    HealOrchestrator(SurefireReportReader reportReader, LocatorHealer locatorHealer, PageObjectPatcher patcher,
+            ScenarioRerunner rerunner, boolean pipelineContext, int maxRetries,
+            FeatureFileResolver featureFileResolver, HealerGitClient gitClient,
+            HealerPullRequestCreator pullRequestCreator, NotFixablePrCommenter notFixablePrCommenter) {
         this.reportReader = reportReader;
         this.locatorHealer = locatorHealer;
         this.patcher = patcher;
         this.rerunner = rerunner;
         this.pipelineContext = pipelineContext;
         this.maxRetries = maxRetries;
+        this.featureFileResolver = featureFileResolver;
+        this.gitClient = gitClient;
+        this.pullRequestCreator = pullRequestCreator;
+        this.notFixablePrCommenter = notFixablePrCommenter;
     }
 
     public List<Result> run() throws IOException {
@@ -152,16 +222,59 @@ public class HealOrchestrator {
         // or a genuinely passing test suite; either way, there's nothing to do.
         List<TestFailure> failures = reportReader.readFailures();
         if (failures.isEmpty()) {
-            return new RunSummary(List.of(), List.of(), maxRetries);
+            RunSummary empty = new RunSummary(List.of(), List.of(), maxRetries, List.of(), List.of());
+            writeRunReport(empty, Map.of());
+            return empty;
         }
 
-        AtomicInteger retriesUsed = new AtomicInteger(0);
-        List<HealAttempt> attempts = new ArrayList<>();
-        List<Result> results = new ArrayList<>();
+        // Group by Surefire classname (a Cucumber feature's "Feature:" line) so every scenario
+        // failure in the same .feature file can be branched/PR'd together in pipeline context -
+        // see FeatureFileResolver/ScenarioGroup. Each scenario inside still gets its OWN retry
+        // budget below; grouping only changes what happens to the resulting changes afterward.
+        Map<String, List<TestFailure>> failuresByClassName = new LinkedHashMap<>();
         for (TestFailure failure : failures) {
-            results.add(processFailure(failure, retriesUsed, attempts));
+            failuresByClassName.computeIfAbsent(failure.className, key -> new ArrayList<>()).add(failure);
         }
-        return new RunSummary(results, attempts, maxRetries);
+
+        List<Result> allResults = new ArrayList<>();
+        List<HealAttempt> allAttempts = new ArrayList<>();
+        List<GroupOutcome> groupOutcomes = new ArrayList<>();
+        List<UnresolvedFeature> unresolvedFeatures = new ArrayList<>();
+
+        for (Map.Entry<String, List<TestFailure>> entry : failuresByClassName.entrySet()) {
+            String className = entry.getKey();
+            List<TestFailure> groupFailures = entry.getValue();
+
+            FeatureFileResolver.Resolution resolution = featureFileResolver.resolve(className);
+            if (!resolution.resolved()) {
+                unresolvedFeatures.add(new UnresolvedFeature(className, resolution.featureFilesScanned(),
+                        resolution.allFeatureFilePaths(), groupFailures));
+                LOGGER.warning("[UNRESOLVED_FEATURE] \"" + className + "\" - could not match to a .feature file ("
+                        + resolution.featureFilesScanned() + " scanned) - " + groupFailures.size()
+                        + " failure(s) not processed.");
+                continue;
+            }
+
+            ScenarioGroup group = new ScenarioGroup(resolution.filePath(), groupFailures);
+            List<Result> groupResults = new ArrayList<>();
+            List<HealAttempt> groupAttempts = new ArrayList<>();
+            for (TestFailure failure : groupFailures) {
+                // Fresh per-scenario budget - see HealerConfig.maxRetriesPerScenario(). Not
+                // shared with any other scenario, even one in the same ScenarioGroup.
+                AtomicInteger retriesUsed = new AtomicInteger(0);
+                groupResults.add(processFailure(failure, retriesUsed, groupAttempts));
+            }
+
+            allResults.addAll(groupResults);
+            allAttempts.addAll(groupAttempts);
+            groupOutcomes.add(new GroupOutcome(group, groupResults, groupAttempts));
+        }
+
+        RunSummary summary = new RunSummary(allResults, allAttempts, maxRetries, groupOutcomes, unresolvedFeatures);
+
+        Map<Path, PrOutcome> prOutcomes = pipelineContext ? wireGitAndPullRequests(groupOutcomes) : Map.of();
+        writeRunReport(summary, prOutcomes);
+        return summary;
     }
 
     private Result processFailure(TestFailure failure, AtomicInteger retriesUsed, List<HealAttempt> attempts) {
@@ -169,22 +282,7 @@ public class HealOrchestrator {
         if (classification == FailureClassifier.Classification.NOT_FIXABLE) {
             LOGGER.warning("[NOT_FIXABLE] \"" + failure.testName + "\" (" + failure.failureType
                     + ") - needs human attention");
-            return new Result(failure, Outcome.NOT_FIXABLE, List.of(), failure.failureType);
-        }
-
-        if (pipelineContext) {
-            try {
-                LocatorHealer.HealResult healResult = locatorHealer.heal(failure);
-                LOGGER.info("[SUGGESTION] \"" + failure.testName + "\" -> " + healResult.filePath + ":"
-                        + healResult.lineNumber + " newSelector=" + healResult.newSelector
-                        + " confidence=" + healResult.confidence + " matchedElement=" + healResult.matchedElement
-                        + " (pipeline context: suggestion only - no file changes, no test re-run)");
-                return new Result(failure, Outcome.SUGGESTION_LOGGED, List.of(), healResult.newSelector);
-            } catch (Exception e) {
-                LOGGER.severe("[HEAL_ERROR] \"" + failure.testName + "\" - "
-                        + e.getClass().getSimpleName() + ": " + e.getMessage());
-                return new Result(failure, Outcome.HEAL_ERROR, List.of(), e.getMessage());
-            }
+            return new Result(failure, Outcome.NOT_FIXABLE, List.of(), List.of(), failure.failureType);
         }
 
         return healWithRetryChain(failure, retriesUsed, attempts);
@@ -194,9 +292,12 @@ public class HealOrchestrator {
     // or revert based on whether the fresh failure (if any) is at the same locator or a different
     // one. On "different locator," the loop continues with that fresh failure instead of stopping
     // - chasing a chain of previously-masked breaks - until it passes, hits a non-locator failure,
-    // or the shared retry budget runs out.
+    // or this scenario's own retry budget runs out. Runs identically whether pipelineContext is
+    // true or false - what differs between the two contexts is entirely in runWithSummary()'s
+    // post-processing (git/PR wiring), not in how a single scenario gets healed.
     private Result healWithRetryChain(TestFailure originalFailure, AtomicInteger retriesUsed, List<HealAttempt> attempts) {
         List<String> healedAndKept = new ArrayList<>();
+        List<Path> changedFiles = new ArrayList<>();
         TestFailure currentFailure = originalFailure;
 
         while (true) {
@@ -208,25 +309,26 @@ public class HealOrchestrator {
                     String note = "after healing " + lastHealed(healedAndKept) + ", the test now fails for a "
                             + "different, non-locator reason (" + currentFailure.failureType + ") - needs human attention.";
                     LOGGER.warning("[NOT_FIXABLE] \"" + originalFailure.testName + "\" - " + note);
-                    return new Result(originalFailure, Outcome.NOT_FIXABLE, healedAndKept, note);
+                    return new Result(originalFailure, Outcome.NOT_FIXABLE, healedAndKept, changedFiles, note);
                 }
             }
 
             if (retriesUsed.get() >= maxRetries) {
                 String note = healedAndKept.isEmpty()
-                        ? "retry budget (" + maxRetries + ") was already exhausted by earlier failures in this "
-                            + "batch before this one could be attempted."
+                        ? "retry budget (" + maxRetries + ") for this scenario was already exhausted before it "
+                            + "could be attempted."
                         : "test still fails after healing " + lastHealed(healedAndKept) + " - the failure has "
                             + describeCurrentFailure(currentFailure) + ", which may indicate the original fix "
                             + "was correct but the test has more than one problem. Ran out of retries (max "
                             + maxRetries + ") before resolving it.";
                 LOGGER.warning("[MAX_RETRIES_EXCEEDED] \"" + originalFailure.testName + "\" - " + note);
-                return new Result(originalFailure, Outcome.MAX_RETRIES_EXCEEDED, healedAndKept, note);
+                return new Result(originalFailure, Outcome.MAX_RETRIES_EXCEEDED, healedAndKept, changedFiles, note);
             }
 
-            // Every heal() call below consumes exactly one unit of the shared maxRetries budget -
-            // the increment happens here, before the outcome is known, so the attempt number
-            // recorded below always matches retriesUsed at the moment the attempt was spent.
+            // Every heal() call below consumes exactly one unit of this scenario's own
+            // maxRetriesPerScenario budget - the increment happens here, before the outcome is
+            // known, so the attempt number recorded below always matches retriesUsed at the
+            // moment the attempt was spent.
             int attemptNumber = retriesUsed.incrementAndGet();
 
             LocatorHealer.HealResult healResult;
@@ -237,7 +339,7 @@ public class HealOrchestrator {
                         + e.getClass().getSimpleName() + ": " + e.getMessage());
                 attempts.add(new HealAttempt(attemptNumber, false, "HEAL_ERROR",
                         "\"" + currentFailure.testName + "\": " + e.getClass().getSimpleName() + ": " + e.getMessage()));
-                return new Result(originalFailure, Outcome.HEAL_ERROR, healedAndKept, e.getMessage());
+                return new Result(originalFailure, Outcome.HEAL_ERROR, healedAndKept, changedFiles, e.getMessage());
             }
 
             if (healResult.filePath == null) {
@@ -245,7 +347,7 @@ public class HealOrchestrator {
                 LOGGER.warning("[PATCH_REFUSED] \"" + originalFailure.testName + "\" - " + note);
                 attempts.add(new HealAttempt(attemptNumber, false, "PATCH_REFUSED",
                         "\"" + healResult.brokenLocator + "\": " + note));
-                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, note);
+                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, changedFiles, note);
             }
 
             String originalContent;
@@ -256,7 +358,7 @@ public class HealOrchestrator {
                         + healResult.filePath + ": " + e.getMessage());
                 attempts.add(new HealAttempt(attemptNumber, false, "PATCH_REFUSED",
                         healResult.filePath + ": " + e.getMessage()));
-                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, e.getMessage());
+                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, changedFiles, e.getMessage());
             }
 
             PageObjectPatcher.PatchResult patchResult =
@@ -272,24 +374,25 @@ public class HealOrchestrator {
                 }
                 attempts.add(new HealAttempt(attemptNumber, false, "HEAL_ERROR",
                         describeForSummary(healResult) + " (re-run failed to even run: " + e.getMessage() + ")"));
-                return new Result(originalFailure, Outcome.HEAL_ERROR, healedAndKept, e.getMessage());
+                return new Result(originalFailure, Outcome.HEAL_ERROR, healedAndKept, changedFiles, e.getMessage());
             }
 
             if (freshFailure == null) {
                 // Passed.
                 if (patchResult.applied) {
                     healedAndKept.add(describePatch(healResult));
+                    changedFiles.add(healResult.filePath);
                     LOGGER.info("[HEALED] \"" + originalFailure.testName + "\" - " + describePatch(healResult)
                             + "; re-run passed. Left as an uncommitted change for review.");
                     attempts.add(new HealAttempt(attemptNumber, true, "HEALED", describeForSummary(healResult)));
-                    return new Result(originalFailure, Outcome.HEALED, healedAndKept, "");
+                    return new Result(originalFailure, Outcome.HEALED, healedAndKept, changedFiles, "");
                 }
                 LOGGER.info("[ALREADY_PASSING] \"" + originalFailure.testName + "\" - " + patchResult.reason
                         + "; re-run already passes without this patch (likely fixed by an earlier "
                         + "failure in this same batch).");
                 attempts.add(new HealAttempt(attemptNumber, true, "ALREADY_PASSING",
                         "\"" + currentFailure.testName + "\": " + patchResult.reason));
-                return new Result(originalFailure, Outcome.ALREADY_PASSING, healedAndKept, patchResult.reason);
+                return new Result(originalFailure, Outcome.ALREADY_PASSING, healedAndKept, changedFiles, patchResult.reason);
             }
 
             if (!patchResult.applied) {
@@ -297,7 +400,7 @@ public class HealOrchestrator {
                 LOGGER.warning("[PATCH_REFUSED] \"" + originalFailure.testName + "\" - " + patchResult.reason);
                 attempts.add(new HealAttempt(attemptNumber, false, "PATCH_REFUSED",
                         "\"" + currentFailure.testName + "\": " + patchResult.reason));
-                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, patchResult.reason);
+                return new Result(originalFailure, Outcome.PATCH_REFUSED, healedAndKept, changedFiles, patchResult.reason);
             }
 
             String freshLocator = LocatorHealer.tryExtractBrokenLocator(freshFailure);
@@ -309,17 +412,78 @@ public class HealOrchestrator {
                         + "exact same locator - the suggested fix did not resolve it. Reverted.";
                 LOGGER.warning("[HEAL_FAILED] \"" + originalFailure.testName + "\" - " + note);
                 attempts.add(new HealAttempt(attemptNumber, false, "HEAL_FAILED", describeForSummary(healResult) + " (reverted)"));
-                return new Result(originalFailure, Outcome.HEAL_FAILED, healedAndKept, note);
+                return new Result(originalFailure, Outcome.HEAL_FAILED, healedAndKept, changedFiles, note);
             }
 
             // Different locator (or a fresh failure that isn't locator-shaped at all) - genuine
             // progress. Keep this patch and chase the newly-unmasked failure in turn.
             healedAndKept.add(describePatch(healResult));
+            changedFiles.add(healResult.filePath);
             LOGGER.info("[PROGRESS] \"" + originalFailure.testName + "\" - " + describePatch(healResult)
                     + " kept; the scenario's failure has " + describeCurrentFailure(freshFailure) + " - continuing.");
             attempts.add(new HealAttempt(attemptNumber, true, "HEALED", describeForSummary(healResult)));
             currentFailure = freshFailure;
         }
+    }
+
+    // GitHub-pipeline-context only: for every ScenarioGroup that healed at least one failure
+    // (has at least one genuinely changed file), pushes a branch (HealerGitClient), opens a PR
+    // against main (HealerPullRequestCreator), and comments on that PR for every NOT_FIXABLE
+    // failure encountered while processing the group (NotFixablePrCommenter) - in that order. A
+    // group that healed nothing is left alone entirely: nothing to branch or PR, and its
+    // NOT_FIXABLE entries (if any) fall through to HealerRunReport instead. A group's own git/PR
+    // failure is logged and skipped rather than aborting the rest of the run.
+    private Map<Path, PrOutcome> wireGitAndPullRequests(List<GroupOutcome> groupOutcomes) {
+        Map<Path, PrOutcome> prOutcomes = new LinkedHashMap<>();
+        for (GroupOutcome groupOutcome : groupOutcomes) {
+            List<Path> changedFiles = distinctChangedFiles(groupOutcome.results());
+            if (changedFiles.isEmpty()) {
+                continue;
+            }
+
+            ScenarioGroup group = groupOutcome.group();
+            String summaryText = buildSummary(
+                    new RunSummary(groupOutcome.results(), groupOutcome.attempts(), maxRetries, List.of(), List.of()));
+
+            try {
+                HealerGitClient.BranchResult branch =
+                        gitClient.commitAndPushHealedGroup(group, changedFiles, summaryText);
+                HealerPullRequestCreator.PullRequest pullRequest =
+                        pullRequestCreator.createPullRequest(branch.branchName(), group.featureFilePath(), summaryText);
+
+                List<Result> notFixable = groupOutcome.results().stream()
+                        .filter(result -> result.outcome == Outcome.NOT_FIXABLE)
+                        .toList();
+                if (!notFixable.isEmpty()) {
+                    notFixablePrCommenter.postNotFixableComments(pullRequest.number(), notFixable);
+                }
+
+                prOutcomes.put(group.featureFilePath(),
+                        new PrOutcome(branch.branchName(), pullRequest.number(), pullRequest.htmlUrl()));
+                LOGGER.info("[PR_CREATED] " + group.featureFilePath() + " -> " + pullRequest.htmlUrl());
+            } catch (Exception e) {
+                LOGGER.severe("[GIT_PR_ERROR] " + group.featureFilePath() + " - "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }
+        return prOutcomes;
+    }
+
+    private void writeRunReport(RunSummary summary, Map<Path, PrOutcome> prOutcomes) {
+        try {
+            Path written = HealerRunReport.write(summary, prOutcomes);
+            LOGGER.info("Healer run report written to " + written);
+        } catch (IOException e) {
+            LOGGER.severe("Failed to write healer run report: " + e.getMessage());
+        }
+    }
+
+    private static List<Path> distinctChangedFiles(List<Result> results) {
+        LinkedHashSet<Path> files = new LinkedHashSet<>();
+        for (Result result : results) {
+            files.addAll(result.changedFiles);
+        }
+        return new ArrayList<>(files);
     }
 
     private static String describePatch(LocatorHealer.HealResult healResult) {
@@ -409,8 +573,9 @@ public class HealOrchestrator {
     // Mirrors ai-reviewer's GitHubContext.isPresent() exactly, duplicated rather than depended on:
     // ai-healer is documented as having no dependency on either other module, and reusing a single
     // boolean check isn't worth pulling in a whole module for - same call already made for
-    // HealerOllamaClient vs. ai-reviewer's OllamaConfig. If a real shared layer ever gets built,
-    // this is one of the things that would move into it.
+    // HealerOllamaClient vs. ai-reviewer's OllamaConfig, and for HealerGitHubConfig's
+    // repository()/apiBase() vs. GitHubContext. If a real shared layer ever gets built, this is
+    // one of the things that would move into it.
     private static boolean isPipelineContext() {
         return notBlank(System.getenv("GITHUB_REPOSITORY"))
                 && (notBlank(System.getenv("GITHUB_PR_NUMBER")) || notBlank(System.getenv("CHANGE_ID")))
@@ -425,7 +590,10 @@ public class HealOrchestrator {
     // attempt LOGGER lines main() prints above it, which stay exactly as they were. Printed via
     // System.out (not the logger) specifically so it renders as a clean box, with no per-line
     // timestamp/class-name prefix. Package-private (not private) so tests can assert on the exact
-    // rendered text.
+    // rendered text. Also reused, unmodified, as the exact text of a pipeline-context git commit
+    // message and PR body for a single ScenarioGroup (see wireGitAndPullRequests above) - callers
+    // there simply pass a RunSummary scoped to just that group's own results/attempts instead of
+    // the whole run's.
     static String buildSummary(RunSummary summary) {
         String bar = "=".repeat(42);
         StringBuilder sb = new StringBuilder();
@@ -459,9 +627,10 @@ public class HealOrchestrator {
         int total = attempts.size();
         // The retry budget is the reason a MAX_RETRIES_EXCEEDED result exists at all - see
         // healWithRetryChain's budget check above, which returns that outcome specifically when
-        // retriesUsed has hit maxRetries before a scenario fully resolved. Any other still-broken
-        // outcome (NOT_FIXABLE, HEAL_FAILED, PATCH_REFUSED, HEAL_ERROR) needs a human, not a
-        // re-run - re-running the exact same command wouldn't change anything about those.
+        // retriesUsed has hit this scenario's own maxRetriesPerScenario before it fully resolved.
+        // Any other still-broken outcome (NOT_FIXABLE, HEAL_FAILED, PATCH_REFUSED, HEAL_ERROR)
+        // needs a human, not a re-run - re-running the exact same command wouldn't change
+        // anything about those.
         boolean budgetReached = summary.results().stream().anyMatch(r -> r.outcome == Outcome.MAX_RETRIES_EXCEEDED);
         long needsHuman = summary.results().stream()
                 .filter(r -> r.outcome == Outcome.NOT_FIXABLE || r.outcome == Outcome.HEAL_FAILED
@@ -471,7 +640,7 @@ public class HealOrchestrator {
         sb.append("RESULT: ").append(succeeded).append(" of ").append(total).append(" attempt")
                 .append(total == 1 ? "" : "s").append(" succeeded");
         if (budgetReached) {
-            sb.append(", retry budget (maxRetries=").append(summary.maxRetries()).append(") reached.\n");
+            sb.append(", retry budget (maxRetriesPerScenario=").append(summary.maxRetries()).append(") reached.\n");
             sb.append("If failures remain, re-run this command again to continue healing further.\n");
         } else {
             sb.append(".\n");
@@ -489,27 +658,18 @@ public class HealOrchestrator {
     }
 
     private static String noAttemptsExplanation(List<Result> results) {
-        boolean allSuggestions = !results.isEmpty()
-                && results.stream().allMatch(r -> r.outcome == Outcome.SUGGESTION_LOGGED);
-        if (allSuggestions) {
-            return "No files changed - pipeline context: suggestion(s) only logged, see detailed logs above.";
-        }
         return "No heal attempts were made - every failure was NOT_FIXABLE (needs human attention; "
                 + "see detailed logs above).";
     }
 
-    // Every kept patch's describePatch() entry in Result.healedAndKept starts with
-    // "fileName.java:lineNumber " - pulling the part before that first colon out of every result
-    // gives the distinct set of files this run actually touched, in the order they were first
-    // touched, without needing a separate accumulator threaded through healWithRetryChain.
+    // Every kept patch's Result.changedFiles entry is the real source Path it was applied to -
+    // pulling the distinct set of those out of every result, in the order they were first
+    // touched, gives the file list this run actually touched.
     private static List<String> changedFileNames(List<Result> results) {
         LinkedHashSet<String> files = new LinkedHashSet<>();
         for (Result result : results) {
-            for (String healed : result.healedAndKept) {
-                int colonIdx = healed.indexOf(':');
-                if (colonIdx > 0) {
-                    files.add(healed.substring(0, colonIdx));
-                }
+            for (Path path : result.changedFiles) {
+                files.add(path.getFileName().toString());
             }
         }
         return new ArrayList<>(files);
@@ -533,6 +693,11 @@ public class HealOrchestrator {
             if (result.note != null && !result.note.isBlank()) {
                 LOGGER.info("      note: " + result.note);
             }
+        }
+        for (UnresolvedFeature unresolved : summary.unresolvedFeatures()) {
+            LOGGER.warning("  [UNRESOLVED_FEATURE] \"" + unresolved.className() + "\" - "
+                    + unresolved.failures().size() + " failure(s) not processed (" + unresolved.featureFilesScanned()
+                    + " .feature file(s) scanned, none matched).");
         }
 
         System.out.println();

@@ -10,7 +10,7 @@ import java.util.Properties;
 /**
  * Resolves the two settings HealOrchestrator needs, each from its own file since one is an
  * ai-healer setting and the other is a genuine Playwright setting: the max number of heal-attempt
- * cycles per invocation (ai.healer.maxRetries, ai-healer/config.properties - it was never a
+ * cycles per SCENARIO (ai.healer.maxRetriesPerScenario, ai-healer/config.properties - it was never a
  * Playwright test-execution setting, so it doesn't belong in playwright-tests' own config, and
  * resolves through the same three-tier order as HealerOllamaClient.model() - config file, then an
  * env var, then a hardcoded default), and the Playwright action timeout (playwright.timeout,
@@ -23,9 +23,9 @@ import java.util.Properties;
  */
 final class HealerConfig {
 
-    private static final int DEFAULT_MAX_RETRIES = 2;
+    private static final int DEFAULT_MAX_RETRIES_PER_SCENARIO = 2;
     private static final int DEFAULT_PLAYWRIGHT_TIMEOUT_MS = 30000;
-    private static final String MAX_RETRIES_ENV_VAR = "AI_HEALER_MAX_RETRIES";
+    private static final String MAX_RETRIES_PER_SCENARIO_ENV_VAR = "AI_HEALER_MAX_RETRIES_PER_SCENARIO";
     private static final Path HEALER_CONFIG_RELATIVE_PATH = Path.of("ai-healer", "config.properties");
     private static final Path PLAYWRIGHT_CONFIG_RELATIVE_PATH =
             Path.of("playwright-tests", "src", "test", "resources", "config.properties");
@@ -33,20 +33,22 @@ final class HealerConfig {
     private HealerConfig() {
     }
 
-    // The maximum number of heal-attempt cycles (LocatorHealer.heal() calls) a single
-    // HealOrchestrator.run() will spend across all failures it processes. Resolved the same
-    // three-tier way as HealerOllamaClient.model(): ai-healer/config.properties, then
-    // AI_HEALER_MAX_RETRIES, then the hardcoded default.
-    static int maxRetries() {
-        String fromConfigFile = readProperty(HEALER_CONFIG_RELATIVE_PATH, "ai.healer.maxRetries");
+    // The maximum number of heal-attempt cycles (LocatorHealer.heal() calls) HealOrchestrator will
+    // spend on any ONE scenario's retry chain before giving up on it and moving to the next - a
+    // budget per scenario, not a pool shared across every failure in the run (see
+    // HealOrchestrator.runWithSummary()). Resolved the same three-tier way as
+    // HealerOllamaClient.model(): ai-healer/config.properties, then
+    // AI_HEALER_MAX_RETRIES_PER_SCENARIO, then the hardcoded default.
+    static int maxRetriesPerScenario() {
+        String fromConfigFile = readProperty(HEALER_CONFIG_RELATIVE_PATH, "ai.healer.maxRetriesPerScenario");
         if (fromConfigFile != null) {
-            return parseIntOrDefault(fromConfigFile, DEFAULT_MAX_RETRIES);
+            return parseIntOrDefault(fromConfigFile, DEFAULT_MAX_RETRIES_PER_SCENARIO);
         }
-        String fromEnv = System.getenv(MAX_RETRIES_ENV_VAR);
+        String fromEnv = System.getenv(MAX_RETRIES_PER_SCENARIO_ENV_VAR);
         if (fromEnv != null && !fromEnv.isBlank()) {
-            return parseIntOrDefault(fromEnv, DEFAULT_MAX_RETRIES);
+            return parseIntOrDefault(fromEnv, DEFAULT_MAX_RETRIES_PER_SCENARIO);
         }
-        return DEFAULT_MAX_RETRIES;
+        return DEFAULT_MAX_RETRIES_PER_SCENARIO;
     }
 
     // Playwright's own default action/navigation timeout, in milliseconds - see

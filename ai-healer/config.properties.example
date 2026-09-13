@@ -1,7 +1,13 @@
 # Ollama model. qwen3:14b also tested. Avoid 32b+ on 24GB RAM machines — insufficient margin.
 ollama.model=qwen2.5-coder:14b
 
-# Maximum number of heal-attempt cycles (LocatorHealer calls) HealOrchestrator will spend across
-# all failures in a single invocation before stopping and reporting whatever remains. Read
-# directly by ai-healer's HealerConfig, not through FrameworkConfig - see README Section 3c.
-ai.healer.maxRetries=2
+# Maximum number of heal-attempt cycles (LocatorHealer calls) HealOrchestrator will spend on any
+# ONE scenario's retry chain before giving up on that scenario and moving to the next - a budget
+# per scenario, not a pool shared across every failure in a single invocation. Read directly by
+# ai-healer's HealerConfig, not through FrameworkConfig - see README Section 3c.
+ai.healer.maxRetriesPerScenario=2
+
+# Note: the GitHub token for ai-healer's own pipeline-context git/PR flow (HealerPullRequestCreator,
+# NotFixablePrCommenter) is NOT read from this file - env-var only (AI_HEALER_GITHUB_TOKEN), the
+# way Jenkins' credentials() binding injects it. A config-file tier was removed after a real token
+# leaked from a value left in a local config.properties during manual testing.
