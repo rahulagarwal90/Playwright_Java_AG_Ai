@@ -93,7 +93,9 @@ public class HealOrchestratorTest {
         List<HealOrchestrator.Result> results = orchestrator.run();
 
         assertEquals(HealOrchestrator.Outcome.HEALED, results.get(0).outcome);
-        assertEquals(List.of("LoginPage.java:1 \"#login-button-BROKEN\" -> \"#login-button\""), results.get(0).healedAndKept);
+        assertEquals(List.of(new HealOrchestrator.HealedLocatorEntry(
+                        "LoginPage.java:1 \"#login-button-BROKEN\" -> \"#login-button\"", "high", false)),
+                results.get(0).healedAndKept);
         assertEquals("private final String loginButton = \"#login-button\";\n",
                 Files.readString(pageFile, StandardCharsets.UTF_8));
 
@@ -122,7 +124,9 @@ public class HealOrchestratorTest {
         List<HealOrchestrator.Result> results = orchestrator.run();
 
         assertEquals(HealOrchestrator.Outcome.HEALED, results.get(0).outcome);
-        assertEquals(List.of("LoginPage.java:1 \"#login-button-BROKEN\" -> \"#login-button\""), results.get(0).healedAndKept);
+        assertEquals(List.of(new HealOrchestrator.HealedLocatorEntry(
+                        "LoginPage.java:1 \"#login-button-BROKEN\" -> \"#login-button\"", "high", false)),
+                results.get(0).healedAndKept);
         assertEquals("private final String loginButton = \"#login-button\";\n",
                 Files.readString(pageFile, StandardCharsets.UTF_8));
     }
@@ -192,8 +196,10 @@ public class HealOrchestratorTest {
 
         assertEquals(HealOrchestrator.Outcome.HEALED, results.get(0).outcome);
         assertEquals(List.of(
-                        "LoginPage.java:1 \"password\" -> \"#password\"",
-                        "LoginPage.java:2 \"#login-button-BROKEN\" -> \"#login-button\""),
+                        new HealOrchestrator.HealedLocatorEntry(
+                                "LoginPage.java:1 \"password\" -> \"#password\"", "high", false),
+                        new HealOrchestrator.HealedLocatorEntry(
+                                "LoginPage.java:2 \"#login-button-BROKEN\" -> \"#login-button\"", "high", false)),
                 results.get(0).healedAndKept);
         assertEquals(
                 "private final String passwordInput = \"#password\";\n"
@@ -231,7 +237,9 @@ public class HealOrchestratorTest {
         List<HealOrchestrator.Result> results = orchestrator.run();
 
         assertEquals(HealOrchestrator.Outcome.MAX_RETRIES_EXCEEDED, results.get(0).outcome);
-        assertEquals(List.of("LoginPage.java:1 \"password\" -> \"#password\""), results.get(0).healedAndKept,
+        assertEquals(List.of(new HealOrchestrator.HealedLocatorEntry(
+                        "LoginPage.java:1 \"password\" -> \"#password\"", "high", false)),
+                results.get(0).healedAndKept,
                 "the correct first fix must be kept, not reverted, even though the budget ran out "
                 + "before the second locator could be attempted");
         assertTrue(results.get(0).note.contains("#login-button-BROKEN"),
@@ -380,6 +388,38 @@ public class HealOrchestratorTest {
 
         assertTrue(rendered.contains("No heal attempts were made"), "rendered summary was:\n" + rendered);
         assertTrue(rendered.contains("NOT_FIXABLE"), "rendered summary was:\n" + rendered);
+    }
+
+    @Test
+    void healedAttemptSurfacesLowConfidenceAndAmbiguousMatchInSummaryAndResult(@TempDir Path tempDir) throws Exception {
+        Path pageFile = tempDir.resolve("LoginPage.java");
+        Files.writeString(pageFile, "private final String loginButton = \"#login-button-BROKEN\";\n", StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure failure = locatorFailure("#login-button-BROKEN");
+        when(reader.readFailures()).thenReturn(List.of(failure));
+
+        LocatorHealer.HealResult healResult = healResult("#login-button-BROKEN", "#login-button", pageFile, 1);
+        healResult.confidence = "low";
+        healResult.matchedElement = "text=\"Login\" [NOT UNIQUE]";
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        when(locatorHealer.heal(failure)).thenReturn(healResult);
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, name -> null, false, DEFAULT_MAX_RETRIES);
+
+        HealOrchestrator.RunSummary summary = orchestrator.runWithSummary();
+
+        assertEquals(HealOrchestrator.Outcome.HEALED, summary.results().get(0).outcome);
+        assertEquals(List.of(new HealOrchestrator.HealedLocatorEntry(
+                        "LoginPage.java:1 \"#login-button-BROKEN\" -> \"#login-button\"", "low", true)),
+                summary.results().get(0).healedAndKept);
+
+        String rendered = HealOrchestrator.buildSummary(summary);
+        assertTrue(rendered.contains(
+                        "LoginPage.java:1: \"#login-button-BROKEN\" -> \"#login-button\" (confidence: low, ambiguous match)"),
+                "rendered summary was:\n" + rendered);
     }
 
     // testName/className are a real scenario from a real feature file in this repo

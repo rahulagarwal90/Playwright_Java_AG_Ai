@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ai.healer.HealOrchestrator.GroupOutcome;
+import com.ai.healer.HealOrchestrator.HealedLocatorEntry;
 import com.ai.healer.HealOrchestrator.Outcome;
 import com.ai.healer.HealOrchestrator.PrOutcome;
 import com.ai.healer.HealOrchestrator.Result;
@@ -31,7 +32,8 @@ public class HealerRunReportTest {
         failure.className = "User Login Flow";
 
         Result result = newResult(failure, Outcome.HEALED,
-                List.of("LoginPage.java:1 \"#broken\" -> \"#login-button\""), List.of(), "");
+                List.of(new HealedLocatorEntry("LoginPage.java:1 \"#broken\" -> \"#login-button\"", "low", true)),
+                List.of(), "");
         ScenarioGroup group = new ScenarioGroup(tempDir.resolve("login.feature"), List.of(failure));
         GroupOutcome groupOutcome = new GroupOutcome(group, List.of(result), List.of());
         RunSummary summary = new RunSummary(List.of(result), List.of(), 2, List.of(groupOutcome), List.of());
@@ -42,8 +44,10 @@ public class HealerRunReportTest {
         JsonObject document = JsonParser.parseString(Files.readString(outputPath, StandardCharsets.UTF_8)).getAsJsonObject();
         JsonObject featureGroup = document.getAsJsonArray("featureGroups").get(0).getAsJsonObject();
         assertEquals(false, featureGroup.get("prCreated").getAsBoolean());
-        assertEquals("LoginPage.java:1 \"#broken\" -> \"#login-button\"",
-                featureGroup.getAsJsonArray("healedAndKept").get(0).getAsString());
+        JsonObject healedEntry = featureGroup.getAsJsonArray("healedAndKept").get(0).getAsJsonObject();
+        assertEquals("LoginPage.java:1 \"#broken\" -> \"#login-button\"", healedEntry.get("description").getAsString());
+        assertEquals("low", healedEntry.get("confidence").getAsString());
+        assertEquals(true, healedEntry.get("ambiguousMatch").getAsBoolean());
     }
 
     @Test
@@ -94,7 +98,7 @@ public class HealerRunReportTest {
 
     // HealOrchestrator.Result's constructor is package-private (com.ai.healer) - reflection avoids
     // needing to either widen it just for this test or run a full HealOrchestrator to get one.
-    private static Result newResult(TestFailure failure, Outcome outcome, List<String> healedAndKept,
+    private static Result newResult(TestFailure failure, Outcome outcome, List<HealedLocatorEntry> healedAndKept,
             List<Path> changedFiles, String note) throws Exception {
         Constructor<Result> constructor = Result.class.getDeclaredConstructor(
                 TestFailure.class, Outcome.class, List.class, List.class, String.class);

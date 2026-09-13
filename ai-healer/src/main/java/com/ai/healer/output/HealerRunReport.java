@@ -88,10 +88,16 @@ public final class HealerRunReport {
         return document;
     }
 
-    private static List<String> healedAndKept(List<Result> results) {
-        List<String> all = new ArrayList<>();
+    private static List<HealedEntry> healedAndKept(List<Result> results) {
+        List<HealedEntry> all = new ArrayList<>();
         for (Result result : results) {
-            all.addAll(result.healedAndKept);
+            for (HealOrchestrator.HealedLocatorEntry healed : result.healedAndKept) {
+                HealedEntry entry = new HealedEntry();
+                entry.description = healed.description();
+                entry.confidence = healed.confidence();
+                entry.ambiguousMatch = healed.ambiguousMatch();
+                all.add(entry);
+            }
         }
         return all;
     }
@@ -128,8 +134,19 @@ public final class HealerRunReport {
         String featureFile;
         boolean prCreated;
         String pullRequestUrl;
-        List<String> healedAndKept;
+        List<HealedEntry> healedAndKept;
         List<NotFixableEntry> notFixable;
+    }
+
+    // Same "old" -> "new" description LocatorHealer/HealOrchestrator's summary already reports,
+    // plus the two HealResult details (confidence, and whether matchedElement was flagged
+    // [NOT UNIQUE] - see HealOrchestrator.HealedLocatorEntry) worth surfacing here too, so a human
+    // reviewing this report can spot a heal worth a closer look without re-reading the summary
+    // text.
+    private static final class HealedEntry {
+        String description;
+        String confidence;
+        boolean ambiguousMatch;
     }
 
     private static final class NotFixableEntry {

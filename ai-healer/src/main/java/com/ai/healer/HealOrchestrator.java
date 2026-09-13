@@ -80,12 +80,21 @@ public class HealOrchestrator {
         HEAL_ERROR
     }
 
+    // One locator fix that got applied and kept - the human-readable "file:line \"old\" ->
+    // \"new\"" text plus the LocatorHealer.HealResult detail (confidence, and whether
+    // matchedElement was flagged [NOT UNIQUE]) needed to flag a heal worth a closer look, in both
+    // the run summary and HealerRunReport's JSON. Carried alongside description rather than
+    // requiring a caller to re-derive it from a HealResult that's otherwise discarded once a
+    // patch is applied and kept.
+    public record HealedLocatorEntry(String description, String confidence, boolean ambiguousMatch) {
+    }
+
     public static class Result {
         public final TestFailure originalFailure;
         public final Outcome outcome;
-        // Human-readable "file:line \"old\" -> \"new\"" entries, in the order they were applied
-        // and kept, for every locator that genuinely got fixed while processing this failure.
-        public final List<String> healedAndKept;
+        // One entry per locator that genuinely got fixed while processing this failure, in the
+        // order they were applied and kept.
+        public final List<HealedLocatorEntry> healedAndKept;
         // The real source file paths behind healedAndKept, same order, deduplicated - what
         // HealerGitClient stages and HealerRunReport/buildSummary's file list are both built from.
         public final List<Path> changedFiles;
@@ -93,8 +102,8 @@ public class HealOrchestrator {
         // an already-passing result. Empty string if there's nothing to add.
         public final String note;
 
-        Result(TestFailure originalFailure, Outcome outcome, List<String> healedAndKept, List<Path> changedFiles,
-                String note) {
+        Result(TestFailure originalFailure, Outcome outcome, List<HealedLocatorEntry> healedAndKept,
+                List<Path> changedFiles, String note) {
             this.originalFailure = originalFailure;
             this.outcome = outcome;
             this.healedAndKept = healedAndKept;
@@ -296,7 +305,7 @@ public class HealOrchestrator {
     // true or false - what differs between the two contexts is entirely in runWithSummary()'s
     // post-processing (git/PR wiring), not in how a single scenario gets healed.
     private Result healWithRetryChain(TestFailure originalFailure, AtomicInteger retriesUsed, List<HealAttempt> attempts) {
-        List<String> healedAndKept = new ArrayList<>();
+        List<HealedLocatorEntry> healedAndKept = new ArrayList<>();
         List<Path> changedFiles = new ArrayList<>();
         TestFailure currentFailure = originalFailure;
 
@@ -380,11 +389,12 @@ public class HealOrchestrator {
             if (freshFailure == null) {
                 // Passed.
                 if (patchResult.applied) {
-                    healedAndKept.add(describePatch(healResult));
+                    healedAndKept.add(toHealedEntry(healResult));
                     changedFiles.add(healResult.filePath);
                     LOGGER.info("[HEALED] \"" + originalFailure.testName + "\" - " + describePatch(healResult)
                             + "; re-run passed. Left as an uncommitted change for review.");
-                    attempts.add(new HealAttempt(attemptNumber, true, "HEALED", describeForSummary(healResult)));
+                    attempts.add(new HealAttempt(attemptNumber, true, "HEALED",
+                            describeForSummary(healResult) + confidenceSuffix(healResult)));
                     return new Result(originalFailure, Outcome.HEALED, healedAndKept, changedFiles, "");
                 }
                 LOGGER.info("[ALREADY_PASSING] \"" + originalFailure.testName + "\" - " + patchResult.reason
@@ -417,11 +427,12 @@ public class HealOrchestrator {
 
             // Different locator (or a fresh failure that isn't locator-shaped at all) - genuine
             // progress. Keep this patch and chase the newly-unmasked failure in turn.
-            healedAndKept.add(describePatch(healResult));
+            healedAndKept.add(toHealedEntry(healResult));
             changedFiles.add(healResult.filePath);
             LOGGER.info("[PROGRESS] \"" + originalFailure.testName + "\" - " + describePatch(healResult)
                     + " kept; the scenario's failure has " + describeCurrentFailure(freshFailure) + " - continuing.");
-            attempts.add(new HealAttempt(attemptNumber, true, "HEALED", describeForSummary(healResult)));
+            attempts.add(new HealAttempt(attemptNumber, true, "HEALED",
+                    describeForSummary(healResult) + confidenceSuffix(healResult)));
             currentFailure = freshFailure;
         }
     }
@@ -519,8 +530,39 @@ public class HealOrchestrator {
                 : "changed to a different, non-locator problem (" + failure.failureType + ")";
     }
 
-    private static String lastHealed(List<String> healedAndKept) {
-        return healedAndKept.isEmpty() ? "the previous locator" : healedAndKept.get(healedAndKept.size() - 1);
+    private static String lastHealed(List<HealedLocatorEntry> healedAndKept) {
+        return healedAndKept.isEmpty()
+                ? "the previous locator" : healedAndKept.get(healedAndKept.size() - 1).description();
+    }
+
+    private static HealedLocatorEntry toHealedEntry(LocatorHealer.HealResult healResult) {
+        return new HealedLocatorEntry(describePatch(healResult), healResult.confidence, isAmbiguousMatch(healResult));
+    }
+
+    // LocatorHealer flags a candidate property (text/role/aria) shared by more than one element
+    // in the DOM snapshot with a literal "[NOT UNIQUE]" marker inside matchedElement - see its
+    // buildUserPrompt/formatCandidates. That marker surviving into the model's own matchedElement
+    // answer means the heal it picked may not be unique on the real page either, which is exactly
+    // the kind of heal worth flagging alongside confidence rather than treating as a clean fix.
+    private static boolean isAmbiguousMatch(LocatorHealer.HealResult healResult) {
+        return healResult.matchedElement != null && healResult.matchedElement.contains("[NOT UNIQUE]");
+    }
+
+    // Extra detail appended to a HEALED attempt's summary line only when there's something worth
+    // flagging - a non-"high" confidence, an ambiguous ([NOT UNIQUE]) match, or both - so a normal
+    // clean heal's line stays exactly as it always has. Deliberately not applied to every
+    // describeForSummary() call site (e.g. a reverted HEAL_FAILED attempt): only a kept HEALED
+    // result is a "fix a human might want to double-check," per the task this was added for.
+    private static String confidenceSuffix(LocatorHealer.HealResult healResult) {
+        List<String> details = new ArrayList<>();
+        String confidence = healResult.confidence;
+        if (confidence != null && !confidence.isBlank() && !confidence.equalsIgnoreCase("high")) {
+            details.add("confidence: " + confidence);
+        }
+        if (isAmbiguousMatch(healResult)) {
+            details.add("ambiguous match");
+        }
+        return details.isEmpty() ? "" : " (" + String.join(", ", details) + ")";
     }
 
     private void revert(Path filePath, String originalContent, String testName) {
@@ -687,8 +729,8 @@ public class HealOrchestrator {
         LOGGER.info("HealOrchestrator finished: " + results.size() + " failure(s) processed.");
         for (Result result : results) {
             LOGGER.info("  \"" + result.originalFailure.testName + "\" -> " + result.outcome);
-            for (String healed : result.healedAndKept) {
-                LOGGER.info("      healed+kept: " + healed);
+            for (HealedLocatorEntry healed : result.healedAndKept) {
+                LOGGER.info("      healed+kept: " + healed.description());
             }
             if (result.note != null && !result.note.isBlank()) {
                 LOGGER.info("      note: " + result.note);
