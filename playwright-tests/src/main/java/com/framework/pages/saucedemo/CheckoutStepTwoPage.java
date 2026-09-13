@@ -19,6 +19,7 @@ public class CheckoutStepTwoPage extends BasePage {
     public void verifyItemTotalIsDisplayed() {
         logger.info("Verifying item total label visibility...");
         assertThat(page.locator(itemTotalLabel)).isVisible();
+        assertThat(page.locator(itemTotalLabel)).hasText("Item total: $29.99");
     }
 
     @Step("Clicking on finish button")

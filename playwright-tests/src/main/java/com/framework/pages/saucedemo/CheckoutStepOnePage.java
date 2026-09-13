@@ -4,6 +4,10 @@ import com.framework.pages.BasePage;
 import com.microsoft.playwright.Page;
 import io.qameta.allure.Step;
 
+import java.util.regex.Pattern;
+
+import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat;
+
 public class CheckoutStepOnePage extends BasePage {
 
     // Locators
@@ -21,7 +25,11 @@ public class CheckoutStepOnePage extends BasePage {
         type(firstNameInput, firstName);
         type(lastNameInput, lastName);
         type(zipcodeInput, zip);
+        assertThat(page.locator(firstNameInput)).hasValue(firstName);
+        assertThat(page.locator(lastNameInput)).hasValue(lastName);
+        assertThat(page.locator(zipcodeInput)).hasValue(zip);
         click(continueButton);
+        assertThat(page).hasURL(Pattern.compile(".*checkout-step-two.*"));
         return new CheckoutStepTwoPage(page);
     }
 }

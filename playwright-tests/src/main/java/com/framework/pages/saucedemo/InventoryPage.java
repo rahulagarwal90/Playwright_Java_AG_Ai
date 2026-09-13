@@ -23,6 +23,7 @@ public class InventoryPage extends BasePage {
     public void verifySuccessfulLogin() {
         logger.info("Verifying successful login...");
         assertThat(page.locator(inventoryContainer).first()).isVisible();
+        assertThat(page.locator(inventoryContainer).first()).containsText("Sauce Labs Backpack");
     }
 
     @Step("Adding product to cart: {productName}")
@@ -51,10 +52,12 @@ public class InventoryPage extends BasePage {
     @Step("Verifying Sauce Labs Backpack shows as added to cart")
     public void verifyBackpackAddedToCart() {
         assertThat(page.locator(removeBackpackButton)).isVisible();
+        assertThat(page.locator(removeBackpackButton)).hasText("Remove");
     }
 
     @Step("Verifying Sauce Labs Bike Light shows as added to cart")
     public void verifyBikeLightAddedToCart() {
         assertThat(page.locator(removeBikeLightButton)).isVisible();
+        assertThat(page.locator(removeBikeLightButton)).hasText("Remove");
     }
 }

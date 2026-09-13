@@ -13,7 +13,7 @@ public class DemoQaPage extends BasePage {
     private final String permanentAddressInput = "#permanentAddress";
     private final String submitButton = "#submit";
     private final String outputName = "#output #name";
-    private final String webTablesNavLink = "text=eb Tables";
+    private final String webTablesNavLink = "text=Web Tables";
 
     public DemoQaPage(Page page) {
         super(page);
