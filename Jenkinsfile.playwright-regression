@@ -42,24 +42,50 @@ pipeline {
         stage('Execute Playwright Suites') {
             steps {
                 script {
-                    // Defensively handle null parameters if triggered before parameter initialization (first run)
-                    String browserParam = (env.BROWSER != null && env.BROWSER.trim() != "null" && env.BROWSER.trim() != "") ? env.BROWSER.trim() : "chrome"
-                    String workersParam = (env.WORKERS != null && env.WORKERS.trim() != "null" && env.WORKERS.trim() != "") ? env.WORKERS.trim() : "2"
-                    String tagParam = (env.TAGS != null && env.TAGS.trim() != "null") ? env.TAGS.trim() : ""
-                    
-                    String tagArg = ""
-                    if (tagParam != "") {
-                        tagArg = "-Dcucumber.filter.tags=\"${tagParam}\""
-                        echo "Starting headless Playwright test run using browser: ${browserParam}, filtering by tags: ${tagParam}, workers: ${workersParam}..."
-                    } else {
-                        echo "Starting headless Playwright test run using browser: ${browserParam}, executing ALL tests (no tag filter), workers: ${workersParam}..."
+                    catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                        // Defensively handle null parameters if triggered before parameter initialization (first run)
+                        String browserParam = (env.BROWSER != null && env.BROWSER.trim() != "null" && env.BROWSER.trim() != "") ? env.BROWSER.trim() : "chrome"
+                        String workersParam = (env.WORKERS != null && env.WORKERS.trim() != "null" && env.WORKERS.trim() != "") ? env.WORKERS.trim() : "2"
+                        String tagParam = (env.TAGS != null && env.TAGS.trim() != "null") ? env.TAGS.trim() : ""
+
+                        String tagArg = ""
+                        if (tagParam != "") {
+                            tagArg = "-Dcucumber.filter.tags=\"${tagParam}\""
+                            echo "Starting headless Playwright test run using browser: ${browserParam}, filtering by tags: ${tagParam}, workers: ${workersParam}..."
+                        } else {
+                            echo "Starting headless Playwright test run using browser: ${browserParam}, executing ALL tests (no tag filter), workers: ${workersParam}..."
+                        }
+
+                        // Execute browser suites headlessly targeting only the playwright-tests sub-module
+                        if (isUnix()) {
+                            sh "mvn -pl playwright-tests clean test -Dbrowser.headless=true -Dbrowser=${browserParam} ${tagArg} -Dworkers=${workersParam}"
+                        } else {
+                            bat "mvn -pl playwright-tests clean test -Dbrowser.headless=true -Dbrowser=${browserParam} ${tagArg} -Dworkers=${workersParam}"
+                        }
                     }
-                    
-                    // Execute browser suites headlessly targeting only the playwright-tests sub-module
+                }
+            }
+        }
+
+        stage('Heal Broken Locators') {
+            when {
+                expression { currentBuild.currentResult == 'FAILURE' }
+            }
+            // GITHUB_REPOSITORY/CHANGE_ID/GITHUB_TOKEN below are placeholders only, to satisfy
+            // HealOrchestrator.isPipelineContext()'s presence check (this is a scheduled/branch
+            // build, not a real GitHub PR) - only AI_HEALER_GITHUB_TOKEN is real and load-bearing.
+            environment {
+                GITHUB_REPOSITORY = 'rahulagarwal90/Playwright_Java_AG_Ai'
+                CHANGE_ID = 'regression'
+                GITHUB_TOKEN = 'placeholder-not-used-by-healer'
+                AI_HEALER_GITHUB_TOKEN = credentials('github-Ai-Healer-token')
+            }
+            steps {
+                script {
                     if (isUnix()) {
-                        sh "mvn -pl playwright-tests clean test -Dbrowser.headless=true -Dbrowser=${browserParam} ${tagArg} -Dworkers=${workersParam}"
+                        sh 'mvn -pl ai-healer exec:java -Dexec.mainClass="com.ai.healer.HealOrchestrator"'
                     } else {
-                        bat "mvn -pl playwright-tests clean test -Dbrowser.headless=true -Dbrowser=${browserParam} ${tagArg} -Dworkers=${workersParam}"
+                        bat 'mvn -pl ai-healer exec:java -Dexec.mainClass="com.ai.healer.HealOrchestrator"'
                     }
                 }
             }
@@ -77,6 +103,9 @@ pipeline {
                 // Archive cucumber execution media assets (Videos, Screenshots, Traces) out of playwright-tests target directory
                 archiveArtifacts artifacts: 'playwright-tests/target/videos/**/*, playwright-tests/target/screenshots/**/*, playwright-tests/target/traces/**/*', allowEmptyArchive: true
 
+                // Archive the AI Healer's run report, tolerant of it not existing on a clean-pass run
+                archiveArtifacts artifacts: 'ai-healer/target/healer-run-report.json', allowEmptyArchive: true
+
                 // Publish Allure Report (Using the installed Allure Jenkins Plugin) wrapped in try-catch
                 try {
                     allure includeProperties: false, results: [[path: 'playwright-tests/target/allure-results']]
@@ -91,6 +120,7 @@ pipeline {
                 echo "                  TEST REPORTS                    "
                 echo "=================================================="
                 echo "JUnit Test Report URL: ${env.BUILD_URL}testReport/"
+                echo "AI Healer Report: ${env.BUILD_URL}artifact/ai-healer/target/healer-run-report.json"
                 echo "=================================================="
             }
         }
