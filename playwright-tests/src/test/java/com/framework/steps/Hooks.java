@@ -113,15 +113,36 @@ public class Hooks {
         logger.info("==========================================================================");
     }
 
+    // Query selector for which elements get included in the snapshot. Broadened from the original
+    // button,input,a,select,[role],[data-test],[data-testid],[onclick],[tabindex] after a real
+    // scan of every locator this codebase's page objects actually use (see CLAUDE.md's "capture
+    // broadening" note): real locators target id and CSS class in addition to data-test, but never
+    // target a "name" attribute, so [name] was deliberately NOT added - confirmed against the real
+    // scan rather than assumed.
+    private static final String DOM_SNAPSHOT_SELECTOR =
+            "button,input,a,select,[id],[class],[role],[data-test],[data-testid],[onclick],[tabindex]";
+
     private void captureDomSnapshot(String safeName) {
         try {
             Path dir = Paths.get("target/dom-snapshots");
             if (Files.notExists(dir)) Files.createDirectories(dir);
+
+            // No slice/cap here on purpose: at capture time Hooks has no idea which locator
+            // actually broke (Cucumber's Scenario doesn't expose the failing exception), so it
+            // has nothing to rank candidates by - truncating in raw DOM order here risks silently
+            // dropping the one element the healer actually needs (confirmed for real: a
+            // class-heavy DemoQA page produced 211 matches, and the correct element sat at index
+            // 199 - past a 100-cap applied at this point, it would never reach LocatorHealer at
+            // all). LocatorHealer knows the broken locator string once it loads this file, so
+            // ranking-then-capping to 100 happens there instead - see
+            // LocatorHealer.rankBySimilarityAndCap(). DOM snapshots are small, failure-only,
+            // on-disk diagnostic artifacts, so writing every match here is cheap.
             String json = (String) PlaywrightFactory.getPage().evaluate(
-                "() => JSON.stringify(Array.from(document.querySelectorAll(" +
-                "'button,input,a,select,[role],[data-test],[data-testid],[onclick],[tabindex]'))" +
-                ".slice(0,100).map(e => ({tag:e.tagName, id:e.id, testId:e.dataset.test||e.dataset.testid, " +
-                "role:e.getAttribute('role'), aria:e.getAttribute('aria-label'), text:(e.innerText||'').slice(0,40)})))"
+                "(sel) => JSON.stringify(Array.from(document.querySelectorAll(sel))" +
+                ".map(e => ({tag:e.tagName, id:e.id, dataTest:e.dataset.test||null, " +
+                "dataTestId:e.dataset.testid||null, className:e.getAttribute('class')||null, " +
+                "role:e.getAttribute('role'), aria:e.getAttribute('aria-label'), text:(e.innerText||'').slice(0,40)})))",
+                DOM_SNAPSHOT_SELECTOR
             );
             Files.writeString(dir.resolve(safeName + "-dom.json"), json);
         } catch (Exception e) {

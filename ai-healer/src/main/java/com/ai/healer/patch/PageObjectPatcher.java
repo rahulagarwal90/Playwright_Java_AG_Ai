@@ -53,9 +53,16 @@ public class PageObjectPatcher {
         if (newSelector == null || newSelector.isBlank()) {
             return PatchResult.notApplied("No replacement selector was provided");
         }
+
+        // A model-suggested selector may use double quotes (e.g. echoing a full Java statement
+        // like page.locator("#id") instead of the requested bare selector, or simply preferring
+        // double-quoted attribute values). Normalize to this codebase's single-quote convention
+        // before validating, rather than rejecting an otherwise-fixable suggestion outright.
+        newSelector = newSelector.replace('"', '\'');
         if (newSelector.contains("\"")) {
-            // Inserting a raw double quote would prematurely close the string literal and leave
-            // the file syntactically broken - refuse rather than produce invalid Java.
+            // Unreachable today - the replace above removes every double quote - but kept as a
+            // defensive check for some other genuinely unrepresentable character in the future,
+            // since a raw double quote here would still prematurely close the string literal.
             return PatchResult.notApplied(
                     "Replacement selector contains a double quote, which would break the string "
                     + "literal it's inserted into: " + newSelector);

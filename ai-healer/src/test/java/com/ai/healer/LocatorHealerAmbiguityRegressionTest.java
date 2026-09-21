@@ -26,10 +26,10 @@ import org.junit.jupiter.api.io.TempDir;
  * Unlike every other LocatorHealerTest case, which mocks HealerOllamaClient to test
  * LocatorHealer's own prompt-building/uniqueness-marking logic in isolation, these three exist to
  * verify actual MODEL BEHAVIOR against that already-correct prompt: given the exact ambiguity
- * shape a real SauceDemo heal produced (CartPage.cartItemName, testId="inventory-item-name",
+ * shape a real SauceDemo heal produced (CartPage.cartItemName, dataTest="inventory-item-name",
  * sharing its visible text "Sauce Labs Backpack" with a sibling title-link element that has no
  * unique attribute at all), does the model actually follow the prompt's instruction to prefer the
- * unique id/data-test/testId over the ambiguous [NOT UNIQUE] text - plus a genuinely-ambiguous
+ * unique id/data-test over the ambiguous [NOT UNIQUE] text - plus a genuinely-ambiguous
  * case (no unique attribute anywhere) and a clean fully-unique control, so a regression in either
  * direction (the model ignoring the instruction, or a future prompt change breaking the easy
  * case) would be caught by a real call, not just by asserting on the prompt text sent to a mock.
@@ -87,8 +87,8 @@ public class LocatorHealerAmbiguityRegressionTest {
         // ONLY thing distinguishing it from the real target - exactly the trap a text-based guess
         // would fall into.
         String snapshotJson = "["
-                + "{\"tag\":\"A\",\"id\":null,\"testId\":null,\"role\":null,\"aria\":null,\"text\":\"Sauce Labs Backpack\"},"
-                + "{\"tag\":\"DIV\",\"id\":null,\"testId\":\"inventory-item-name\",\"role\":null,\"aria\":null,\"text\":\"Sauce Labs Backpack\"}"
+                + "{\"tag\":\"A\",\"id\":null,\"dataTest\":null,\"role\":null,\"aria\":null,\"text\":\"Sauce Labs Backpack\"},"
+                + "{\"tag\":\"DIV\",\"id\":null,\"dataTest\":\"inventory-item-name\",\"role\":null,\"aria\":null,\"text\":\"Sauce Labs Backpack\"}"
                 + "]";
         Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
         Files.writeString(snapshotPath, snapshotJson);
@@ -120,8 +120,8 @@ public class LocatorHealerAmbiguityRegressionTest {
         // all - genuinely indistinguishable from the DOM snapshot alone. There is no correct
         // confident answer here; the model should say so rather than guess.
         String snapshotJson = "["
-                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":null,\"role\":\"button\",\"aria\":null,\"text\":\"Remove\"},"
-                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":null,\"role\":\"button\",\"aria\":null,\"text\":\"Remove\"}"
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"dataTest\":null,\"role\":\"button\",\"aria\":null,\"text\":\"Remove\"},"
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"dataTest\":null,\"role\":\"button\",\"aria\":null,\"text\":\"Remove\"}"
                 + "]";
         Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
         Files.writeString(snapshotPath, snapshotJson);
@@ -142,12 +142,12 @@ public class LocatorHealerAmbiguityRegressionTest {
     void healRemainsHighConfidenceForFullyUniqueCandidate(@TempDir Path tempDir) throws Exception {
         // Baseline/control: one candidate has a unique data-test, and the only other element in
         // the snapshot shares none of its properties (different tag, different text, no
-        // overlapping id/testId/role/aria). Included so a future regression in the OTHER
+        // overlapping id/dataTest/role/aria). Included so a future regression in the OTHER
         // direction - the model (or a prompt change) losing confidence on an unambiguous case -
         // would also be caught, not just the ambiguous-case regressions above.
         String snapshotJson = "["
-                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":\"add-to-cart-sauce-labs-backpack\",\"role\":null,\"aria\":null,\"text\":\"Add to cart\"},"
-                + "{\"tag\":\"A\",\"id\":null,\"testId\":null,\"role\":null,\"aria\":null,\"text\":\"Sauce Labs Backpack\"}"
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"dataTest\":\"add-to-cart-sauce-labs-backpack\",\"role\":null,\"aria\":null,\"text\":\"Add to cart\"},"
+                + "{\"tag\":\"A\",\"id\":null,\"dataTest\":null,\"role\":null,\"aria\":null,\"text\":\"Sauce Labs Backpack\"}"
                 + "]";
         Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
         Files.writeString(snapshotPath, snapshotJson);

@@ -21,8 +21,8 @@ import org.mockito.ArgumentCaptor;
 public class LocatorHealerTest {
 
     private static final String SNAPSHOT_JSON = "["
-            + "{\"tag\":\"INPUT\",\"id\":\"login-button\",\"testId\":\"login-button\",\"role\":null,\"aria\":null,\"text\":\"\"},"
-            + "{\"tag\":\"INPUT\",\"id\":\"user-name\",\"testId\":\"username\",\"role\":null,\"aria\":null,\"text\":\"\"}"
+            + "{\"tag\":\"INPUT\",\"id\":\"login-button\",\"dataTest\":\"login-button\",\"role\":null,\"aria\":null,\"text\":\"\"},"
+            + "{\"tag\":\"INPUT\",\"id\":\"user-name\",\"dataTest\":\"username\",\"role\":null,\"aria\":null,\"text\":\"\"}"
             + "]";
 
     @Test
@@ -61,7 +61,7 @@ public class LocatorHealerTest {
         // Ollama, and the file/line context extracted from the stack trace too.
         assertTrue(userPrompt.contains("#login-button-BROKEN-TEMP"));
         assertTrue(userPrompt.contains("id=login-button"));
-        assertTrue(userPrompt.contains("data-test/data-testid=username"));
+        assertTrue(userPrompt.contains("data-test=username"));
         assertTrue(userPrompt.contains("LoginPage.java:29"));
         assertTrue(!userPrompt.contains("BasePage.java"), "should skip BasePage's generic wrapper frame in favor of the concrete page object frame");
 
@@ -80,10 +80,10 @@ public class LocatorHealerTest {
     @Test
     void flagsNonUniquePropertiesButLeavesUniqueOnesUnmarked(@TempDir Path tempDir) throws Exception {
         // Two SauceDemo-style "Add to cart" buttons sharing the same visible text but each with
-        // its own testId - the exact shape of ambiguity a real inventory page produces.
+        // its own dataTest - the exact shape of ambiguity a real inventory page produces.
         String snapshotJson = "["
-                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":\"add-to-cart-sauce-labs-backpack\",\"role\":null,\"aria\":null,\"text\":\"Add to cart\"},"
-                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":\"add-to-cart-sauce-labs-bike-light\",\"role\":null,\"aria\":null,\"text\":\"Add to cart\"}"
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"dataTest\":\"add-to-cart-sauce-labs-backpack\",\"role\":null,\"aria\":null,\"text\":\"Add to cart\"},"
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"dataTest\":\"add-to-cart-sauce-labs-bike-light\",\"role\":null,\"aria\":null,\"text\":\"Add to cart\"}"
                 + "]";
         Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
         Files.writeString(snapshotPath, snapshotJson);
@@ -106,14 +106,15 @@ public class LocatorHealerTest {
         org.mockito.Mockito.verify(mockClient).suggestLocator(any(), userPromptCaptor.capture());
         String userPrompt = userPromptCaptor.getValue();
 
-        // Both testIds are unique, so they must NOT be flagged, but the shared text must be. The
-        // label itself must describe the real HTML attribute (data-test/data-testid), not the
-        // Java field name "testId" - that's not a real attribute and would produce a dead selector.
-        assertTrue(userPrompt.contains("data-test/data-testid=add-to-cart-sauce-labs-backpack"));
-        assertTrue(userPrompt.contains("data-test/data-testid=add-to-cart-sauce-labs-bike-light"));
-        assertTrue(!userPrompt.contains("data-test/data-testid=add-to-cart-sauce-labs-backpack [NOT UNIQUE]"));
-        assertTrue(!userPrompt.contains("data-test/data-testid=add-to-cart-sauce-labs-bike-light [NOT UNIQUE]"));
+        // Both dataTests are unique, so they must NOT be flagged, but the shared text must be. The
+        // label itself must describe the real HTML attribute (data-test), not the Java field name
+        // "testId"/"dataTest" - that's not a real attribute and would produce a dead selector.
+        assertTrue(userPrompt.contains("data-test=add-to-cart-sauce-labs-backpack"));
+        assertTrue(userPrompt.contains("data-test=add-to-cart-sauce-labs-bike-light"));
+        assertTrue(!userPrompt.contains("data-test=add-to-cart-sauce-labs-backpack [NOT UNIQUE]"));
+        assertTrue(!userPrompt.contains("data-test=add-to-cart-sauce-labs-bike-light [NOT UNIQUE]"));
         assertTrue(!userPrompt.contains("testId="), "the raw Java field name \"testId\" must never appear as a prompt label");
+        assertTrue(!userPrompt.contains("dataTest="), "the raw Java field name \"dataTest\" must never appear as a prompt label");
         assertTrue(userPrompt.contains("text=\"Add to cart\" [NOT UNIQUE]"),
                 "shared text should be flagged [NOT UNIQUE]; prompt was:\n" + userPrompt);
         assertTrue(userPrompt.contains("NOTE:"), "an ambiguity note should be added when candidates share a property");
@@ -148,7 +149,7 @@ public class LocatorHealerTest {
 
     @Test
     void marksGenuinelyUniqueIdAndDataTestValuesAsVerifiedUnique(@TempDir Path tempDir) throws Exception {
-        // SNAPSHOT_JSON's two elements have distinct id AND testId values - real proof of
+        // SNAPSHOT_JSON's two elements have distinct id AND dataTest values - real proof of
         // uniqueness (the code counted exactly one occurrence of each), not merely "id/data-test
         // was never checked so assume it's fine" the way this prompt used to be built.
         Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
@@ -174,8 +175,8 @@ public class LocatorHealerTest {
 
         assertTrue(userPrompt.contains("id=login-button [VERIFIED UNIQUE]"),
                 "a genuinely unique id should be marked [VERIFIED UNIQUE], not just left unmarked; prompt was:\n" + userPrompt);
-        assertTrue(userPrompt.contains("data-test/data-testid=login-button [VERIFIED UNIQUE]"),
-                "a genuinely unique data-test/data-testid should be marked [VERIFIED UNIQUE]; prompt was:\n" + userPrompt);
+        assertTrue(userPrompt.contains("data-test=login-button [VERIFIED UNIQUE]"),
+                "a genuinely unique data-test should be marked [VERIFIED UNIQUE]; prompt was:\n" + userPrompt);
     }
 
     @Test
@@ -185,8 +186,8 @@ public class LocatorHealerTest {
         // id/data-test/data-testid were never checked at all and would have been treated as
         // unique by convention regardless - this must now be caught exactly like duplicate text.
         String snapshotJson = "["
-                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":\"duplicate-test-id\",\"role\":null,\"aria\":null,\"text\":\"Remove\"},"
-                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":\"duplicate-test-id\",\"role\":null,\"aria\":null,\"text\":\"Remove\"}"
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"dataTest\":\"duplicate-test-id\",\"role\":null,\"aria\":null,\"text\":\"Remove\"},"
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"dataTest\":\"duplicate-test-id\",\"role\":null,\"aria\":null,\"text\":\"Remove\"}"
                 + "]";
         Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
         Files.writeString(snapshotPath, snapshotJson);
@@ -209,8 +210,8 @@ public class LocatorHealerTest {
         org.mockito.Mockito.verify(mockClient).suggestLocator(any(), userPromptCaptor.capture());
         String userPrompt = userPromptCaptor.getValue();
 
-        assertTrue(userPrompt.contains("data-test/data-testid=duplicate-test-id [NOT UNIQUE]"),
-                "a genuinely duplicate data-test/data-testid must be flagged [NOT UNIQUE], never assumed unique; prompt was:\n"
+        assertTrue(userPrompt.contains("data-test=duplicate-test-id [NOT UNIQUE]"),
+                "a genuinely duplicate data-test must be flagged [NOT UNIQUE], never assumed unique; prompt was:\n"
                         + userPrompt);
         // The NOTE explanation text itself legitimately mentions the [VERIFIED UNIQUE] marker (to
         // explain what it means), so check the CANDIDATE ELEMENTS listing specifically - neither

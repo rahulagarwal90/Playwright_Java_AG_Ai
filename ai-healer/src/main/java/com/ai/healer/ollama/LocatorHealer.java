@@ -128,7 +128,8 @@ public class LocatorHealer {
         }
 
         String brokenLocator = extractBrokenLocator(failure);
-        List<DomElement> candidates = loadDomSnapshot(failure);
+        List<DomElement> allCandidates = loadDomSnapshot(failure);
+        List<DomElement> candidates = rankBySimilarityAndCap(brokenLocator, allCandidates);
         String fileLineContext = extractFileLineContext(failure.stackTrace);
 
         String userPrompt = buildUserPrompt(brokenLocator, fileLineContext, candidates);
@@ -142,7 +143,8 @@ public class LocatorHealer {
         System.out.println("[HEAL] Model: " + model.value() + " (from " + model.source() + ")");
         System.out.println("[HEAL] System prompt loaded from: classpath:" + SYSTEM_PROMPT_RESOURCE_PATH);
         System.out.println("[HEAL] DOM snapshot loaded from: " + failure.domSnapshotPath
-                + " (" + candidates.size() + " candidate elements)");
+                + " (" + allCandidates.size() + " element(s) captured, " + candidates.size()
+                + " sent to Ollama)");
         if (VERBOSE) {
             LOGGER.info("LocatorHealer system prompt:\n" + SYSTEM_PROMPT);
             LOGGER.info("LocatorHealer user prompt:\n" + userPrompt);
@@ -166,6 +168,185 @@ public class LocatorHealer {
             result.fieldName = location.fieldName();
         }
         return result;
+    }
+
+    // The 100-element cap Hooks.captureDomSnapshot used to apply itself, in raw DOM order, before
+    // it even knew which locator had broken. It's applied here instead, AFTER ranking every
+    // captured element by similarity to the broken locator's own text - so on a busy real page
+    // where Hooks captures more than this many elements, the ones most likely to actually be the
+    // broken locator's target survive, not whatever happened to come first in the DOM. Confirmed
+    // for real this matters: a class-heavy DemoQA page produced 211 candidates, with the correct
+    // element sitting at raw DOM-order index 199 - a cap applied before ranking would drop it
+    // every time, and the healer picked an unrelated ancestor ("#root") instead.
+    private static final int MAX_CANDIDATES = 100;
+
+    // One scored candidate, kept together so the ranked-list logging below (which needs both the
+    // element and its score) doesn't have to re-derive the score after sorting.
+    private record ScoredElement(DomElement element, int score) {
+    }
+
+    // Ranks every captured candidate by similarity to the broken locator, then keeps the top
+    // MAX_CANDIDATES. A no-op (candidates returned unchanged, in their original order) when
+    // there's nothing to cap - the common case on any page under the limit, and exactly the
+    // behavior every existing small-snapshot test already depends on. Public (mirrors
+    // PageObjectLocation/extractPageObjectLocation's precedent) so LocatorHealerRankingTest can
+    // exercise the ranking/capping behavior directly, without needing a real DOM snapshot file.
+    public static List<DomElement> rankBySimilarityAndCap(String brokenLocator, List<DomElement> candidates) {
+        if (candidates.size() <= MAX_CANDIDATES) {
+            return candidates;
+        }
+
+        List<ScoredElement> scored = new ArrayList<>(candidates.size());
+        for (DomElement element : candidates) {
+            scored.add(new ScoredElement(element, similarityScore(brokenLocator, element)));
+        }
+        // List.sort is a stable sort (TimSort), so candidates that score equally - the large
+        // majority on a busy page, having nothing in common with the broken locator - keep their
+        // original relative DOM order rather than being reshuffled arbitrarily.
+        scored.sort((a, b) -> b.score() - a.score());
+
+        System.out.println("[HEAL] Ranked " + candidates.size() + " captured candidates by similarity to "
+                + "the broken locator \"" + brokenLocator + "\"; keeping the top " + MAX_CANDIDATES
+                + " (dropping " + (candidates.size() - MAX_CANDIDATES) + ").");
+        int shown = Math.min(5, scored.size());
+        for (int i = 0; i < shown; i++) {
+            ScoredElement top = scored.get(i);
+            System.out.println("[HEAL]   #" + (i + 1) + " score=" + top.score() + " " + describeForLog(top.element()));
+        }
+
+        List<DomElement> kept = new ArrayList<>(MAX_CANDIDATES);
+        for (int i = 0; i < MAX_CANDIDATES; i++) {
+            kept.add(scored.get(i).element());
+        }
+        return kept;
+    }
+
+    private static String describeForLog(DomElement element) {
+        List<String> parts = new ArrayList<>();
+        if (notBlank(element.tag)) {
+            parts.add("tag=" + element.tag);
+        }
+        if (notBlank(element.id)) {
+            parts.add("id=" + element.id);
+        }
+        if (notBlank(element.dataTest)) {
+            parts.add("data-test=" + element.dataTest);
+        }
+        if (notBlank(element.dataTestId)) {
+            parts.add("data-testid=" + element.dataTestId);
+        }
+        if (notBlank(element.className)) {
+            parts.add("class=" + element.className);
+        }
+        if (notBlank(element.text)) {
+            parts.add("text=\"" + element.text + "\"");
+        }
+        return String.join(" ", parts);
+    }
+
+    // Scores one candidate against the broken locator's own text: the best (highest-scoring)
+    // match across its id/data-test/data-testid/class/text fields. Deliberately simple and
+    // explainable, not a general string-similarity library - just meaningfully better than
+    // arbitrary DOM order.
+    private static int similarityScore(String brokenLocator, DomElement element) {
+        List<String> brokenTokens = tokenize(brokenLocator);
+        String brokenNormalized = normalize(brokenLocator);
+
+        int best = 0;
+        best = Math.max(best, fieldScore(brokenTokens, brokenNormalized, element.id));
+        best = Math.max(best, fieldScore(brokenTokens, brokenNormalized, element.dataTest));
+        best = Math.max(best, fieldScore(brokenTokens, brokenNormalized, element.dataTestId));
+        best = Math.max(best, fieldScore(brokenTokens, brokenNormalized, element.className));
+        best = Math.max(best, fieldScore(brokenTokens, brokenNormalized, element.text));
+        return best;
+    }
+
+    // +4 if the broken locator's text and this field's value fully contain one another once
+    // separator/selector punctuation is stripped (catches a near-miss typo like the missing
+    // hyphen in "[datatest='checkout']" against the real "data-test" attribute, or a single
+    // dropped character like "#nventory_container" against the real "inventory_container"),
+    // plus per-token credit for every (brokenToken, fieldToken) pair: +3 exact match, +2 one
+    // token contains the other, +1 tokens a single edit apart (catches a typo'd whole word that
+    // isn't a simple substring, e.g. "nam" against "name").
+    private static int fieldScore(List<String> brokenTokens, String brokenNormalized, String fieldValue) {
+        if (fieldValue == null || fieldValue.isBlank()) {
+            return 0;
+        }
+        int score = 0;
+        String fieldNormalized = normalize(fieldValue);
+        if (!fieldNormalized.isEmpty() && !brokenNormalized.isEmpty()
+                && (brokenNormalized.contains(fieldNormalized) || fieldNormalized.contains(brokenNormalized))) {
+            score += 4;
+        }
+
+        for (String brokenToken : brokenTokens) {
+            for (String fieldToken : tokenize(fieldValue)) {
+                score += tokenPairScore(brokenToken, fieldToken);
+            }
+        }
+        return score;
+    }
+
+    private static int tokenPairScore(String a, String b) {
+        if (a.equals(b) && a.length() >= 2) {
+            return 3;
+        }
+        if (a.length() >= 3 && b.length() >= 3 && (a.contains(b) || b.contains(a))) {
+            return 2;
+        }
+        // Length >= 4 (stricter than the substring check above) so two short, otherwise-unrelated
+        // tokens like "nam"/"nav" don't collide just because a 3-letter edit distance of 1 is easy
+        // to hit by chance - the substring branch already covers genuine short-token typos like
+        // "nam" against "name" ("name".contains("nam")) without needing this bonus too.
+        if (a.length() >= 4 && b.length() >= 4 && levenshteinDistance(a, b) <= 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Lowercases and strips every non-alphanumeric character (selector punctuation, quotes,
+    // whitespace) with no separators left behind - a plain "same letters, same order" comparison,
+    // used only for the whole-value containment check in fieldScore.
+    private static String normalize(String value) {
+        return value == null ? "" : value.toLowerCase().replaceAll("[^a-z0-9]", "");
+    }
+
+    // Splits on non-alphanumeric separators (-, _, whitespace, CSS/selector punctuation) and on
+    // camelCase boundaries, e.g. "addToCartButton" -> [add, to, cart, button],
+    // "#nventory_container" -> [nventory, container].
+    private static List<String> tokenize(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        String camelCaseSplit = value.replaceAll("(?<=[a-z0-9])(?=[A-Z])", " ");
+        String[] rawTokens = camelCaseSplit.toLowerCase().split("[^a-z0-9]+");
+        List<String> tokens = new ArrayList<>();
+        for (String token : rawTokens) {
+            if (!token.isBlank()) {
+                tokens.add(token);
+            }
+        }
+        return tokens;
+    }
+
+    // Classic Levenshtein edit distance (insert/delete/substitute) - used only as a small bonus
+    // for single-character typos between otherwise-unrelated tokens, not the primary signal.
+    private static int levenshteinDistance(String a, String b) {
+        int[][] distances = new int[a.length() + 1][b.length() + 1];
+        for (int i = 0; i <= a.length(); i++) {
+            distances[i][0] = i;
+        }
+        for (int j = 0; j <= b.length(); j++) {
+            distances[0][j] = j;
+        }
+        for (int i = 1; i <= a.length(); i++) {
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                distances[i][j] = Math.min(Math.min(distances[i - 1][j] + 1, distances[i][j - 1] + 1),
+                        distances[i - 1][j - 1] + cost);
+            }
+        }
+        return distances[a.length()][b.length()];
     }
 
     // Reads the fixed locator-repair instructions out of the packaged system-prompt.md resource
@@ -310,12 +491,14 @@ public class LocatorHealer {
         // id and data-test/data-testid now - is counted the same way, so "unique" always means
         // "the code counted exactly one occurrence," never an assumption.
         Set<String> duplicateIds = findDuplicateValues(candidates, element -> element.id);
-        Set<String> duplicateTestIds = findDuplicateValues(candidates, element -> element.testId);
+        Set<String> duplicateDataTests = findDuplicateValues(candidates, element -> element.dataTest);
+        Set<String> duplicateDataTestIds = findDuplicateValues(candidates, element -> element.dataTestId);
         Set<String> duplicateTexts = findDuplicateValues(candidates, element -> element.text);
         Set<String> duplicateRoles = findDuplicateValues(candidates, element -> element.role);
         Set<String> duplicateArias = findDuplicateValues(candidates, element -> element.aria);
-        boolean hasAmbiguousCandidates = !duplicateIds.isEmpty() || !duplicateTestIds.isEmpty()
-                || !duplicateTexts.isEmpty() || !duplicateRoles.isEmpty() || !duplicateArias.isEmpty();
+        boolean hasAmbiguousCandidates = !duplicateIds.isEmpty() || !duplicateDataTests.isEmpty()
+                || !duplicateDataTestIds.isEmpty() || !duplicateTexts.isEmpty() || !duplicateRoles.isEmpty()
+                || !duplicateArias.isEmpty();
 
         if (hasAmbiguousCandidates) {
             prompt.append("\nNOTE: Some candidate elements below share the same id, data-test/data-testid, ")
@@ -329,8 +512,8 @@ public class LocatorHealer {
         }
 
         prompt.append("\nCANDIDATE ELEMENTS:\n")
-                .append(formatCandidates(candidates, duplicateIds, duplicateTestIds, duplicateTexts, duplicateRoles,
-                        duplicateArias));
+                .append(formatCandidates(candidates, duplicateIds, duplicateDataTests, duplicateDataTestIds,
+                        duplicateTexts, duplicateRoles, duplicateArias));
         return prompt.toString();
     }
 
@@ -354,8 +537,8 @@ public class LocatorHealer {
     }
 
     private static String formatCandidates(List<DomElement> candidates, Set<String> duplicateIds,
-            Set<String> duplicateTestIds, Set<String> duplicateTexts, Set<String> duplicateRoles,
-            Set<String> duplicateArias) {
+            Set<String> duplicateDataTests, Set<String> duplicateDataTestIds, Set<String> duplicateTexts,
+            Set<String> duplicateRoles, Set<String> duplicateArias) {
         StringBuilder sb = new StringBuilder();
         int index = 1;
         for (DomElement element : candidates) {
@@ -366,12 +549,16 @@ public class LocatorHealer {
             if (notBlank(element.id)) {
                 parts.add("id=" + element.id + uniquenessSuffix(element.id, duplicateIds));
             }
-            if (notBlank(element.testId)) {
-                // DomElement.testId (see Hooks.captureDomSnapshot) is populated from an element's
-                // real data-test attribute, falling back to data-testid - never a "testId"
-                // attribute, which doesn't exist on any real page. Label it as what it actually
-                // is so the model builds a selector against a real attribute, not an invented one.
-                parts.add("data-test/data-testid=" + element.testId + uniquenessSuffix(element.testId, duplicateTestIds));
+            if (notBlank(element.dataTest)) {
+                // DomElement.dataTest/dataTestId (see Hooks.captureDomSnapshot) are populated from
+                // an element's real data-test/data-testid attributes independently - never a
+                // "testId" attribute, which doesn't exist on any real page. Label each as the real
+                // attribute it came from so the model builds a selector against a real attribute.
+                parts.add("data-test=" + element.dataTest + uniquenessSuffix(element.dataTest, duplicateDataTests));
+            }
+            if (notBlank(element.dataTestId)) {
+                parts.add("data-testid=" + element.dataTestId
+                        + uniquenessSuffix(element.dataTestId, duplicateDataTestIds));
             }
             if (notBlank(element.role)) {
                 parts.add("role=" + element.role + (duplicateRoles.contains(element.role) ? " [NOT UNIQUE]" : ""));

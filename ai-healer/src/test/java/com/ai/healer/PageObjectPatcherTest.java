@@ -99,20 +99,23 @@ public class PageObjectPatcherTest {
     }
 
     @Test
-    void refusesWhenReplacementWouldContainADoubleQuote(@TempDir Path tempDir) throws IOException {
+    void normalizesDoubleQuotesToSingleQuotesAndPatchesSuccessfully(@TempDir Path tempDir) throws IOException {
         Path file = tempDir.resolve("LoginPage.java");
         Files.writeString(file, PAGE_OBJECT_SOURCE, StandardCharsets.UTF_8);
 
         PageObjectPatcher patcher = new PageObjectPatcher();
         // LocatorHealer's prompt asks for a bare selector, but nothing stops a model from
-        // ignoring that and returning a full Java statement (double-quoted, e.g.) instead -
-        // inserting that verbatim would break the file, so this must be refused defensively.
-        PageObjectPatcher.PatchResult result = patcher.patch(file, 8, "page.locator(\"#login-button\")");
+        // returning a double-quoted attribute selector instead of this codebase's single-quote
+        // convention - that should be normalized and patched in, not refused outright.
+        PageObjectPatcher.PatchResult result = patcher.patch(file, 8, "[data-test=\"login-button\"]");
 
-        assertFalse(result.applied);
-        assertTrue(result.reason.contains("double quote"), result.reason);
-        assertEquals(PAGE_OBJECT_SOURCE, Files.readString(file, StandardCharsets.UTF_8),
-                "file must be untouched when the patch is refused");
+        assertTrue(result.applied, result.reason);
+        String expected = PAGE_OBJECT_SOURCE.replace(
+                "private final String loginButton = \"#login-button-BROKEN-TEMP\";",
+                "private final String loginButton = \"[data-test='login-button']\";");
+        String actual = Files.readString(file, StandardCharsets.UTF_8);
+        assertEquals(expected, actual,
+                "double quotes in the suggestion should be normalized to single quotes, not refused");
     }
 
     @Test

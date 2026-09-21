@@ -136,13 +136,23 @@ consuming classes need to know how the others work.
 **Problem it solves:** Represents one entry from the DOM snapshot JSON `Hooks.java` writes as a Java
 object, so the rest of the code works with real page elements instead of raw JSON.
 
-**In → out:** `{"tag":"INPUT","id":"login-button","testId":"login-button","role":null,"aria":null,"text":""}`
+**In → out:** `{"tag":"INPUT","id":"login-button","dataTest":"login-button","dataTestId":null,"className":null,"role":null,"aria":null,"text":""}`
 becomes one `DomElement` with matching fields.
 
-**One naming trap worth knowing:** `testId` is this field's *Java* name, chosen to match the JSON
-key `Hooks.java` writes — it is **not** a real HTML attribute. The actual attribute it was read
-from (`data-test`, falling back to `data-testid`) only resurfaces when `LocatorHealer` builds its
-Ollama prompt, and getting that relabeling right mattered a lot (see below).
+**Fields, and where each comes from:** `tag`/`id`/`role`/`aria`/`text` are read directly off the
+matched element. `dataTest` and `dataTestId` are read independently off the element's real
+`data-test`/`data-testid` attributes (`e.dataset.test||null` / `e.dataset.testid||null`) — they
+used to be a single merged `testId` field (`e.dataset.test||e.dataset.testid`), which meant
+`LocatorHealer` could never tell which real attribute a given value actually came from; split into
+two real fields so it can. `className` is the element's raw `class` attribute, captured after a
+real scan of this codebase's page-object locators found class-based selectors in genuine use
+(`CartPage.cartItemName`, `InventoryPage.cartIcon`, `CheckoutStepTwoPage.itemTotalLabel`) — captured
+but not yet surfaced by `LocatorHealer.formatCandidates()` or its uniqueness-checking, a deliberate
+scope boundary. **One naming trap still worth knowing:** none of `dataTest`/`dataTestId`/`className`
+are real HTML attribute names — they're this class's *Java* field names, chosen to match the JSON
+keys `Hooks.java` writes. The actual attributes they were read from only resurface when
+`LocatorHealer` builds its Ollama prompt, and getting that relabeling right mattered a lot (see
+below).
 
 **Why it's separate:** Tightly coupled to `Hooks.java`'s JSON shape on purpose — if that shape ever
 changes, one class changes, not scattered code throughout `LocatorHealer`.
@@ -246,12 +256,16 @@ inventory page is the clean real case: three "Add to cart" buttons share identic
 each has its own `data-test` value.
 
 ```
-1. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-backpack [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
-2. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-bike-light [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
-3. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-bolt-t-shirt [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
+1. tag=BUTTON data-test=add-to-cart-sauce-labs-backpack [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
+2. tag=BUTTON data-test=add-to-cart-sauce-labs-bike-light [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
+3. tag=BUTTON data-test=add-to-cart-sauce-labs-bolt-t-shirt [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
 
 → real response: newSelector = "[data-test='add-to-cart-sauce-labs-backpack']", confidence = "high"
 ```
+
+(`data-test` and `data-testid` are printed as two separate labels, each with its own
+`[VERIFIED UNIQUE]`/`[NOT UNIQUE]` marker, rather than one merged `data-test/data-testid` label -
+see `DomElement`'s field split above.)
 
 The model correctly reached for the `[VERIFIED UNIQUE]` `data-test` value instead of the shared,
 `[NOT UNIQUE]` text. With the `data-test` values removed entirely (three identical text-only
