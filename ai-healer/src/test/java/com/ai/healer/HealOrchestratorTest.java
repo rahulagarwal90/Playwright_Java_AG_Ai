@@ -161,6 +161,55 @@ public class HealOrchestratorTest {
                 "file must be reverted to its exact pre-patch content when the re-run still fails at the same locator");
     }
 
+    // Task 1's other requirement: confidence must never skip or shortcut the live re-run/verify
+    // step. Runs the exact same "still fails at the same locator -> revert" scenario twice, once
+    // with a "high" confidence heal and once with "low", and verifies the mocked rerunner is
+    // actually invoked - and the outcome (reverted) is identical - both times. If confidence ever
+    // gated the re-run, a "high" confidence heal here would be kept unverified instead of reverted.
+    @Test
+    void rerunIsAlwaysInvokedAndCanRevertAHighConfidenceHealJustAsReadilyAsALowConfidenceOne(
+            @TempDir Path tempDir) throws Exception {
+        assertRerunIsUnconditionalForConfidence(tempDir, "high");
+    }
+
+    @Test
+    void rerunIsAlwaysInvokedForALowConfidenceHealToo(@TempDir Path tempDir) throws Exception {
+        assertRerunIsUnconditionalForConfidence(tempDir, "low");
+    }
+
+    private void assertRerunIsUnconditionalForConfidence(Path tempDir, String confidence) throws Exception {
+        Path pageFile = tempDir.resolve("LoginPage.java");
+        String original = "private final String loginButton = \"#login-button-BROKEN\";\n";
+        Files.writeString(pageFile, original, StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure failure = locatorFailure("#login-button-BROKEN");
+        when(reader.readFailures()).thenReturn(List.of(failure));
+
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        LocatorHealer.HealResult healResult = healResult("#login-button-BROKEN", "#still-wrong", pageFile, 1);
+        healResult.confidence = confidence;
+        when(locatorHealer.heal(failure)).thenReturn(healResult);
+
+        // Reports the SAME locator still failing regardless of what confidence was reported - a
+        // genuinely unverified fix must be reverted whether the AI called it "high" or "low".
+        HealOrchestrator.ScenarioRerunner rerunner = mock(HealOrchestrator.ScenarioRerunner.class);
+        when(rerunner.rerun(anyString())).thenReturn(locatorFailure("#still-wrong"));
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, rerunner, false, DEFAULT_MAX_RETRIES);
+
+        List<HealOrchestrator.Result> results = orchestrator.run();
+
+        verify(rerunner).rerun(anyString());
+        assertEquals(HealOrchestrator.Outcome.HEAL_FAILED, results.get(0).outcome);
+        assertTrue(results.get(0).healedAndKept.isEmpty(),
+                "a " + confidence + "-confidence patch that fails live re-verification must still be reverted");
+        assertEquals(original, Files.readString(pageFile, StandardCharsets.UTF_8),
+                "confidence must never skip the live re-run/revert check");
+    }
+
     @Test
     void keepsACorrectPatchWhenRerunFailsAtADifferentLocatorAndChasesIt(@TempDir Path tempDir) throws Exception {
         // The real double-break scenario: passwordInput gets healed correctly, but the re-run

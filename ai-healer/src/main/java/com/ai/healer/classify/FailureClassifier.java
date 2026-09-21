@@ -44,7 +44,39 @@ import java.util.regex.Pattern;
  *   locator/assertion, only the selector's correctness differing: CheckoutCompletePage's
  *   completeHeader, broken to ".completeheader" (matches nothing).</li>
  * </ol>
- * Not every real broken-looking locator hits one of these four, on purpose - see
+ * Two more independent patterns cover the same "locator never resolves" idea for two other
+ * web-first assertions:
+ * <ol start="5">
+ *   <li>org.opentest4j.AssertionFailedError from assertThat(locator).isEnabled(), deliberately
+ *   distinguishing "locator resolved to nothing" from "locator resolved to a real element that is
+ *   genuinely disabled" - the latter is a real app/test-data state, not a locator problem, and
+ *   must stay NOT_FIXABLE. Unlike hasText()/hasValue(), Playwright's isEnabled() failure message
+ *   has no "Received: ..." line at all, so the discriminator here is different: a found element is
+ *   dumped inline in the call log as "locator resolved to &lt;input disabled ...&gt;", while a
+ *   locator matching nothing produces no "resolved to" text anywhere. Confirmed against two real
+ *   cases with the identical assertion, only the selector differing: demoqa.com/radio-button's
+ *   "No" option (id="noRadio"), which is disabled by the site itself. Asserting isEnabled() with
+ *   the correct id produced "Locator expected to be enabled" plus a call log ending in
+ *   "locator resolved to &lt;input disabled name=\"like\" id=\"noRadio\" ...&gt;" /
+ *   "unexpected value \"disabled\"" - genuinely found, genuinely disabled, so NOT_FIXABLE. The
+ *   same assertion against "#noRadio-typo" (matches nothing) produced the identical
+ *   "Locator expected to be enabled" message but a call log with only
+ *   "waiting for locator(\"#noRadio-typo\")" and no "resolved to" text at all - LOCATOR_FAILURE.</li>
+ *   <li>org.opentest4j.AssertionFailedError from assertThat(locator).hasValue(...), same shape as
+ *   pattern 4's hasText() case and gated the same way ("Received: null" means zero elements
+ *   resolved; any other "Received: ..." means a real element was found with a genuinely different
+ *   value - a real defect, not a locator problem, so it stays NOT_FIXABLE). Confirmed against two
+ *   real cases with the identical assertion (CheckoutStepOnePage's lastNameInput field, real value
+ *   "Doe"), only the selector's correctness differing: the correct
+ *   "[data-test='lastName']" with a deliberately wrong expected value produced
+ *   "Locator expected to have value: ...\nReceived: Doe" plus a call log line
+ *   "locator resolved to &lt;input type=\"text\" value=\"Doe\" id=\"last-name\" ...&gt;" - a real
+ *   element, genuinely found, so NOT_FIXABLE. The typo'd "[data-test='lastName-typo']" (matches
+ *   nothing) with the correct expected value "Doe" produced
+ *   "Locator expected to have value: Doe\nReceived: null" with no "resolved to" line at all -
+ *   LOCATOR_FAILURE.</li>
+ * </ol>
+ * Not every real broken-looking locator hits one of these six, on purpose - see
  * ARCHITECTURE_EXPLAINED.md for a real one deliberately left NOT_FIXABLE: CheckoutStepOnePage's
  * zipcodeInput turned out not to be broken at all - an unquoted CSS attribute value is
  * functionally identical to a quoted one.
@@ -111,6 +143,42 @@ public class FailureClassifier {
         boolean isTextNotFoundAssertionFailure = type.contains("AssertionFailedError")
                 && message.contains("Locator expected to have text") && message.contains("Received: null");
         if (isTextNotFoundAssertionFailure) {
+            if (!message.contains("waiting for locator")) {
+                return Classification.NOT_FIXABLE;
+            }
+            return Classification.LOCATOR_FAILURE;
+        }
+
+        // Fifth pattern: AssertionFailedError from .isEnabled(). Unlike hasText()/hasValue(), a
+        // failed isEnabled() has no "Received: ..." line at all - Playwright dumps the found
+        // element inline instead ("locator resolved to <input disabled ...>"), so "Received: null"
+        // isn't available as a discriminator here. A locator matching nothing produces no
+        // "resolved to" text anywhere in the message; a locator matching a real (but genuinely
+        // disabled) element always does. Confirmed for real against demoqa.com/radio-button's
+        // disabled "No" option - see class javadoc pattern 5 for both real message shapes.
+        boolean isEnabledAssertionFailure = type.contains("AssertionFailedError")
+                && (message.contains("Locator expected to be enabled") || message.contains("expected to be enabled"));
+        if (isEnabledAssertionFailure) {
+            if (!message.contains("waiting for locator")) {
+                return Classification.NOT_FIXABLE;
+            }
+            if (message.contains("resolved to")) {
+                // Found a real element - it's genuinely disabled, a real app/test-data state, not
+                // a broken locator.
+                return Classification.NOT_FIXABLE;
+            }
+            return Classification.LOCATOR_FAILURE;
+        }
+
+        // Sixth pattern: AssertionFailedError from .hasValue(), same shape as pattern 4's
+        // hasText() case and gated the same way - "Received: null" means zero elements resolved;
+        // any other "Received: ..." means a real element was found with a genuinely different
+        // value, a real defect that must stay NOT_FIXABLE. Confirmed for real against
+        // CheckoutStepOnePage's lastNameInput - see class javadoc pattern 6 for both real message
+        // shapes.
+        boolean isValueNotFoundAssertionFailure = type.contains("AssertionFailedError")
+                && message.contains("Locator expected to have value") && message.contains("Received: null");
+        if (isValueNotFoundAssertionFailure) {
             if (!message.contains("waiting for locator")) {
                 return Classification.NOT_FIXABLE;
             }

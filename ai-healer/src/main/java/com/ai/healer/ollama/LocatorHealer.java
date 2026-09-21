@@ -302,29 +302,35 @@ public class LocatorHealer {
             prompt.append("USED AT: ").append(fileLineContext).append("\n");
         }
 
-        // id/data-test(id) are treated as reliably unique per-element identifiers by convention in
-        // this codebase, so only the free-text-ish properties (text/role/aria) are checked here -
-        // two buttons can easily share the same visible text ("Add to cart") while having distinct
-        // data-test values, and that's exactly the case a locator built from text alone would get
-        // wrong.
+        // id/data-test(id) used to be assumed reliably unique by convention and excluded from
+        // duplicate-checking entirely. That assumption is real in practice but was never actually
+        // verified in code - two elements CAN share the same id/data-test/data-testid (a markup
+        // bug, or a template rendered twice), and a locator built from one in that rare case would
+        // be just as ambiguous as one built from shared text. Every candidate property - including
+        // id and data-test/data-testid now - is counted the same way, so "unique" always means
+        // "the code counted exactly one occurrence," never an assumption.
+        Set<String> duplicateIds = findDuplicateValues(candidates, element -> element.id);
+        Set<String> duplicateTestIds = findDuplicateValues(candidates, element -> element.testId);
         Set<String> duplicateTexts = findDuplicateValues(candidates, element -> element.text);
         Set<String> duplicateRoles = findDuplicateValues(candidates, element -> element.role);
         Set<String> duplicateArias = findDuplicateValues(candidates, element -> element.aria);
-        boolean hasAmbiguousCandidates =
-                !duplicateTexts.isEmpty() || !duplicateRoles.isEmpty() || !duplicateArias.isEmpty();
+        boolean hasAmbiguousCandidates = !duplicateIds.isEmpty() || !duplicateTestIds.isEmpty()
+                || !duplicateTexts.isEmpty() || !duplicateRoles.isEmpty() || !duplicateArias.isEmpty();
 
         if (hasAmbiguousCandidates) {
-            prompt.append("\nNOTE: Some candidate elements below share the same text, role, or ")
-                    .append("aria value - marked [NOT UNIQUE]. A locator built from a [NOT UNIQUE] ")
-                    .append("value could match more than one element on the real page. Prefer a ")
-                    .append("candidate's id or data-test/data-testid value in that case; if only ")
-                    .append("[NOT UNIQUE] properties match and no candidate has a unique ")
-                    .append("id/data-test/data-testid, set confidence to \"low\" and say so in ")
-                    .append("matchedElement.\n");
+            prompt.append("\nNOTE: Some candidate elements below share the same id, data-test/data-testid, ")
+                    .append("text, role, or aria value - marked [NOT UNIQUE]. A locator built from a ")
+                    .append("[NOT UNIQUE] value, of any kind, could match more than one element on the real ")
+                    .append("page. An id or data-test/data-testid value marked [VERIFIED UNIQUE] below has ")
+                    .append("been confirmed to appear on exactly one candidate element; prefer building the ")
+                    .append("locator from one of those. If only [NOT UNIQUE] properties match and no ")
+                    .append("candidate has a [VERIFIED UNIQUE] id/data-test/data-testid, set confidence to ")
+                    .append("\"low\" and say so in matchedElement.\n");
         }
 
         prompt.append("\nCANDIDATE ELEMENTS:\n")
-                .append(formatCandidates(candidates, duplicateTexts, duplicateRoles, duplicateArias));
+                .append(formatCandidates(candidates, duplicateIds, duplicateTestIds, duplicateTexts, duplicateRoles,
+                        duplicateArias));
         return prompt.toString();
     }
 
@@ -347,8 +353,9 @@ public class LocatorHealer {
         return duplicates;
     }
 
-    private static String formatCandidates(List<DomElement> candidates, Set<String> duplicateTexts,
-            Set<String> duplicateRoles, Set<String> duplicateArias) {
+    private static String formatCandidates(List<DomElement> candidates, Set<String> duplicateIds,
+            Set<String> duplicateTestIds, Set<String> duplicateTexts, Set<String> duplicateRoles,
+            Set<String> duplicateArias) {
         StringBuilder sb = new StringBuilder();
         int index = 1;
         for (DomElement element : candidates) {
@@ -357,14 +364,14 @@ public class LocatorHealer {
                 parts.add("tag=" + element.tag);
             }
             if (notBlank(element.id)) {
-                parts.add("id=" + element.id);
+                parts.add("id=" + element.id + uniquenessSuffix(element.id, duplicateIds));
             }
             if (notBlank(element.testId)) {
                 // DomElement.testId (see Hooks.captureDomSnapshot) is populated from an element's
                 // real data-test attribute, falling back to data-testid - never a "testId"
                 // attribute, which doesn't exist on any real page. Label it as what it actually
                 // is so the model builds a selector against a real attribute, not an invented one.
-                parts.add("data-test/data-testid=" + element.testId);
+                parts.add("data-test/data-testid=" + element.testId + uniquenessSuffix(element.testId, duplicateTestIds));
             }
             if (notBlank(element.role)) {
                 parts.add("role=" + element.role + (duplicateRoles.contains(element.role) ? " [NOT UNIQUE]" : ""));
@@ -382,6 +389,15 @@ public class LocatorHealer {
 
     private static boolean notBlank(String value) {
         return value != null && !value.isBlank();
+    }
+
+    // Only called for a non-blank id/data-test/data-testid value (see formatCandidates), so
+    // exactly one of these two applies: the code counted it more than once (genuinely ambiguous,
+    // same as a duplicate text/role/aria value), or it counted exactly one occurrence, in which
+    // case this is real proof of uniqueness - not an assumption "id implies unique" the way this
+    // codebase used to treat these two properties.
+    private static String uniquenessSuffix(String value, Set<String> duplicates) {
+        return duplicates.contains(value) ? " [NOT UNIQUE]" : " [VERIFIED UNIQUE]";
     }
 
     // Reads Ollama's structured-output JSON field by field, matching ai-reviewer's FindingParser

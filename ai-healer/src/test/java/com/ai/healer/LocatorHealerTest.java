@@ -147,6 +147,86 @@ public class LocatorHealerTest {
     }
 
     @Test
+    void marksGenuinelyUniqueIdAndDataTestValuesAsVerifiedUnique(@TempDir Path tempDir) throws Exception {
+        // SNAPSHOT_JSON's two elements have distinct id AND testId values - real proof of
+        // uniqueness (the code counted exactly one occurrence of each), not merely "id/data-test
+        // was never checked so assume it's fine" the way this prompt used to be built.
+        Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
+        Files.writeString(snapshotPath, SNAPSHOT_JSON);
+
+        TestFailure failure = new TestFailure();
+        failure.testName = "Some Scenario";
+        failure.failureMessage = "Call log:\n- waiting for locator(\"#login-button-BROKEN-TEMP\")\n";
+        failure.domSnapshotPath = snapshotPath;
+        failure.domSnapshotFound = true;
+
+        HealerOllamaClient mockClient = mock(HealerOllamaClient.class);
+        when(mockClient.suggestLocator(anyString(), anyString()))
+                .thenReturn("{\"newSelector\":\"#login-button\","
+                        + "\"matchedElement\":\"id=login-button\",\"confidence\":\"high\"}");
+
+        LocatorHealer healer = new LocatorHealer(mockClient);
+        healer.heal(failure);
+
+        ArgumentCaptor<String> userPromptCaptor = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(mockClient).suggestLocator(any(), userPromptCaptor.capture());
+        String userPrompt = userPromptCaptor.getValue();
+
+        assertTrue(userPrompt.contains("id=login-button [VERIFIED UNIQUE]"),
+                "a genuinely unique id should be marked [VERIFIED UNIQUE], not just left unmarked; prompt was:\n" + userPrompt);
+        assertTrue(userPrompt.contains("data-test/data-testid=login-button [VERIFIED UNIQUE]"),
+                "a genuinely unique data-test/data-testid should be marked [VERIFIED UNIQUE]; prompt was:\n" + userPrompt);
+    }
+
+    @Test
+    void flagsGenuinelyDuplicateIdAndDataTestValuesAsNotUnique(@TempDir Path tempDir) throws Exception {
+        // The rare real case Task 1 calls out explicitly: two elements that DO share the same
+        // data-test value (e.g. a markup bug, or a template rendered twice). Before this change
+        // id/data-test/data-testid were never checked at all and would have been treated as
+        // unique by convention regardless - this must now be caught exactly like duplicate text.
+        String snapshotJson = "["
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":\"duplicate-test-id\",\"role\":null,\"aria\":null,\"text\":\"Remove\"},"
+                + "{\"tag\":\"BUTTON\",\"id\":null,\"testId\":\"duplicate-test-id\",\"role\":null,\"aria\":null,\"text\":\"Remove\"}"
+                + "]";
+        Path snapshotPath = tempDir.resolve("Some_Scenario-dom.json");
+        Files.writeString(snapshotPath, snapshotJson);
+
+        TestFailure failure = new TestFailure();
+        failure.testName = "Some Scenario";
+        failure.failureMessage = "Call log:\n- waiting for locator(\"button.remove-item-typo\")\n";
+        failure.domSnapshotPath = snapshotPath;
+        failure.domSnapshotFound = true;
+
+        HealerOllamaClient mockClient = mock(HealerOllamaClient.class);
+        when(mockClient.suggestLocator(anyString(), anyString()))
+                .thenReturn("{\"newSelector\":\"[data-test='duplicate-test-id']\","
+                        + "\"matchedElement\":\"data-test=duplicate-test-id [NOT UNIQUE]\",\"confidence\":\"low\"}");
+
+        LocatorHealer healer = new LocatorHealer(mockClient);
+        LocatorHealer.HealResult result = healer.heal(failure);
+
+        ArgumentCaptor<String> userPromptCaptor = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(mockClient).suggestLocator(any(), userPromptCaptor.capture());
+        String userPrompt = userPromptCaptor.getValue();
+
+        assertTrue(userPrompt.contains("data-test/data-testid=duplicate-test-id [NOT UNIQUE]"),
+                "a genuinely duplicate data-test/data-testid must be flagged [NOT UNIQUE], never assumed unique; prompt was:\n"
+                        + userPrompt);
+        // The NOTE explanation text itself legitimately mentions the [VERIFIED UNIQUE] marker (to
+        // explain what it means), so check the CANDIDATE ELEMENTS listing specifically - neither
+        // candidate here has anything genuinely unique to be marked with.
+        String candidateListing = userPrompt.substring(userPrompt.indexOf("CANDIDATE ELEMENTS:"));
+        assertTrue(!candidateListing.contains("[VERIFIED UNIQUE]"),
+                "no property is actually unique here, so no candidate line should be marked [VERIFIED UNIQUE]; "
+                        + "candidate listing was:\n" + candidateListing);
+        assertTrue(userPrompt.contains("NOTE:"), "an ambiguity note should be added when candidates share a property");
+        // The model's own confidence choice ("low", since nothing here is genuinely unique) is
+        // just passed through unchanged - LocatorHealer doesn't second-guess the model's answer,
+        // it only guarantees the prompt reflects reality.
+        assertEquals("low", result.confidence);
+    }
+
+    @Test
     void extractPageObjectLocationFindsTheActualFieldDeclarationLine(@TempDir Path tempDir) throws IOException {
         // Isolated from the real repo: builds a fake playwright-tests/src/main/java tree under a
         // temp "repo root" so this doesn't depend on what this repo's real page objects contain.

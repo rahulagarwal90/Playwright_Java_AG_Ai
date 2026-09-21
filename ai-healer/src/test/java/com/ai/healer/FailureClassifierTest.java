@@ -222,6 +222,83 @@ public class FailureClassifierTest {
         assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
     }
 
+    // Captured verbatim from a real run against demoqa.com/radio-button, asserting
+    // assertThat(page.locator("#noRadio")).isEnabled() - "#noRadio" is the site's own "No" radio
+    // option, which is disabled by design. The element genuinely resolves; it's just genuinely
+    // disabled - a real app state, not a broken locator. Note there is no "Received: ..." line at
+    // all for isEnabled(), unlike hasText()/hasValue() - the found element is dumped inline in the
+    // call log instead.
+    private static final String REAL_ENABLED_GENUINE_DISABLED_MESSAGE =
+            "Locator expected to be enabled\n"
+            + "Call log:\n"
+            + "Locator.expect with timeout 5000ms\n"
+            + "waiting for locator(\"#noRadio\")\n"
+            + "  locator resolved to <input disabled name=\"like\" id=\"noRadio\" type=\"radio\" c…/>\n"
+            + "  unexpected value \"disabled\"\n";
+
+    // Captured verbatim from the same real page/assertion with the locator typo'd to
+    // "#noRadio-typo" (matches nothing). Same message text as above, but the call log has no
+    // "resolved to" text anywhere - Playwright's own signal that zero elements matched.
+    private static final String REAL_ENABLED_NOT_FOUND_MESSAGE =
+            "Locator expected to be enabled\n"
+            + "Call log:\n"
+            + "Locator.expect with timeout 5000ms\n"
+            + "waiting for locator(\"#noRadio-typo\")\n";
+
+    // Captured verbatim from a real run against saucedemo.com's checkout flow, asserting
+    // assertThat(page.locator("[data-test='lastName']")).hasValue(...) after filling the field
+    // with "Doe" - the real, correct locator, but a deliberately wrong expected value. The
+    // element genuinely resolves and its real value ("Doe") genuinely differs from what was
+    // asserted - a real defect (wrong expected value), not a broken locator.
+    private static final String REAL_VALUE_GENUINE_MISMATCH_MESSAGE =
+            "Locator expected to have value: WRONG-VALUE-FOR-CLASSIFIER-TESTING\n"
+            + "Received: Doe\n"
+            + "\n"
+            + "Call log:\n"
+            + "Locator.expect with timeout 5000ms\n"
+            + "waiting for locator(\"[data-test='lastName']\")\n"
+            + "  locator resolved to <input type=\"text\" value=\"Doe\" id=\"last-name\" name=\"las…/>\n"
+            + "  unexpected value \"Doe\"\n";
+
+    // Captured verbatim from the same real page/flow with the locator typo'd to
+    // "[data-test='lastName-typo']" (matches nothing), correct expected value "Doe". "Received:
+    // null" plus no "resolved to" line - zero elements resolved, a genuinely broken locator.
+    private static final String REAL_VALUE_NOT_FOUND_MESSAGE =
+            "Locator expected to have value: Doe\n"
+            + "Received: null\n"
+            + "\n"
+            + "Call log:\n"
+            + "Locator.expect with timeout 5000ms\n"
+            + "waiting for locator(\"[data-test='lastName-typo']\")\n";
+
+    @Test
+    void realEnabledAssertionNotFoundClassifiesAsLocatorFailure() {
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_ENABLED_NOT_FOUND_MESSAGE);
+
+        assertEquals(Classification.LOCATOR_FAILURE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void realEnabledAssertionGenuineDisabledElementClassifiesAsNotFixable() {
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_ENABLED_GENUINE_DISABLED_MESSAGE);
+
+        assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void realValueAssertionNotFoundClassifiesAsLocatorFailure() {
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_VALUE_NOT_FOUND_MESSAGE);
+
+        assertEquals(Classification.LOCATOR_FAILURE, FailureClassifier.classify(failure));
+    }
+
+    @Test
+    void realValueAssertionGenuineMismatchClassifiesAsNotFixable() {
+        TestFailure failure = failureOf("org.opentest4j.AssertionFailedError", REAL_VALUE_GENUINE_MISMATCH_MESSAGE);
+
+        assertEquals(Classification.NOT_FIXABLE, FailureClassifier.classify(failure));
+    }
+
     @Test
     void realMalformedSelectorDomExceptionClassifiesAsLocatorFailure() {
         TestFailure failure = failureOf("com.microsoft.playwright.PlaywrightException",

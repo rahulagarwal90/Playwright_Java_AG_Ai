@@ -157,8 +157,8 @@ deterministic, no-AI checks, whether a failure even looks like one. Erring too e
 dangerous direction: waving a real defect through as "just a broken locator" would mask it, so every
 pattern below is deliberately narrow.
 
-Four recognized `LOCATOR_FAILURE` shapes, each found chasing a real pre-existing typo in this
-codebase, not invented:
+Six recognized `LOCATOR_FAILURE` shapes, each found chasing a real pre-existing typo (or, for
+patterns 5–6, a real live-triggered case) in this codebase, not invented:
 
 | # | Trigger | Real example found |
 | --- | --- | --- |
@@ -166,6 +166,8 @@ codebase, not invented:
 | 2 | `AssertionFailedError` containing `"expected to be visible"` — Playwright's web-first `assertThat(...).isVisible()` timing out is the same "never resolved" problem as pattern 1, just a different API | `InventoryPage.inventoryContainer` (`"#nventory_container"`, missing the `i`) |
 | 3 | `PlaywrightException` containing `"is not a valid selector"` (the browser's `querySelectorAll` rejecting it) or `"while parsing selector"` (Playwright's own CSS parser rejecting it first — call log has no `locator(...)` wrapper at all in this sub-case) | `CheckoutStepOnePage.lastNameInput` (`"[data-test'lastName']"`, missing `=`) and `continueButton` (unterminated quote) |
 | 4 | `AssertionFailedError` requiring **both** `"Locator expected to have text"` **and** `"Received: null"` — the `Received: null` half is what proves zero elements matched (vs. a real text mismatch, where `Received:` names the actual wrong text and the call log shows `locator resolved to <...>`) | `CheckoutCompletePage.completeHeader` (`.completeheader`, missing a hyphen) |
+| 5 | `AssertionFailedError` containing `"expected to be enabled"` (`.isEnabled()`) with **no** `resolved to` text anywhere in the message — unlike patterns 4/6, a failed `isEnabled()` has no `Received:` line at all, so a *found-but-disabled* element is distinguished by the call log dumping it inline instead (`locator resolved to <input disabled ...>`); its presence means the element genuinely resolved and is genuinely disabled, so that case stays `NOT_FIXABLE` | Triggered live against `demoqa.com/radio-button`'s `"No"` option (`id="noRadio"`, disabled by the site itself): the real locator produced `resolved to <input disabled ...>` (`NOT_FIXABLE`); a typo'd `#noRadio-typo` produced the identical message text but no `resolved to` anywhere (`LOCATOR_FAILURE`) |
+| 6 | `AssertionFailedError` requiring **both** `"Locator expected to have value"` **and** `"Received: null"` (`.hasValue()`) — same discriminator as pattern 4, applied to the same assertion family | Triggered live against `CheckoutStepOnePage.lastNameInput` (real value `"Doe"`): a typo'd `[data-test='lastName-typo']` produced `Received: null` with no `resolved to` line (`LOCATOR_FAILURE`); the correct locator with a deliberately wrong expected value produced `Received: Doe` plus `locator resolved to <input ... value="Doe" ...>` (`NOT_FIXABLE`, a real value mismatch, not a locator problem) |
 
 Any of the above with `resolved to N elements`, N > 0, is treated as `NOT_FIXABLE` regardless —
 the locator worked, so patching it wouldn't fix whatever's actually timing out.
@@ -232,23 +234,37 @@ value over its `id` whenever both are present, matching this codebase's own conv
 `InventoryPage.addProductToCart()`, which builds `[data-test='...']` by hand) — **currently absent
 from the live prompt**, see Known gaps below.
 
-**Uniqueness check, with one representative example.** Before prompting, any `text`/`role`/`aria`
-value shared by more than one candidate is marked `[NOT UNIQUE]` (id/data-test/data-testid are
-treated as reliably unique). SauceDemo's inventory page is the clean real case: three "Add to cart"
-buttons share identical visible text but each has its own `data-test` value.
+**Uniqueness check, with one representative example.** Before prompting, every candidate property —
+`id` and `data-test`/`data-testid` included, not just `text`/`role`/`aria` — is actually counted
+across the candidate list, not assumed unique by convention. A value shared by more than one
+candidate is marked `[NOT UNIQUE]`; an `id`/`data-test`/`data-testid` value the code confirmed
+appears on exactly one candidate is marked `[VERIFIED UNIQUE]` instead of being left unmarked, so
+"unique" always means "the code counted exactly one occurrence," never an assumption (a markup bug
+or a doubly-rendered template could in principle give two elements the same `id`, and a locator
+built from it in that rare case would be just as ambiguous as one built from shared text). SauceDemo's
+inventory page is the clean real case: three "Add to cart" buttons share identical visible text but
+each has its own `data-test` value.
 
 ```
-1. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-backpack text="Add to cart" [NOT UNIQUE]
-2. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-bike-light text="Add to cart" [NOT UNIQUE]
-3. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-bolt-t-shirt text="Add to cart" [NOT UNIQUE]
+1. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-backpack [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
+2. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-bike-light [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
+3. tag=BUTTON data-test/data-testid=add-to-cart-sauce-labs-bolt-t-shirt [VERIFIED UNIQUE] text="Add to cart" [NOT UNIQUE]
 
 → real response: newSelector = "[data-test='add-to-cart-sauce-labs-backpack']", confidence = "high"
 ```
 
-The model correctly reached for the unique `data-test` value instead of the shared text. With the
-`data-test` values removed entirely (three identical text-only `<div>`s, nothing unique at all), the
-model still answered rather than refusing, but honestly set `confidence: "low"` with an explicit
-ambiguity note — the intended behavior when no unique property exists to break the tie.
+The model correctly reached for the `[VERIFIED UNIQUE]` `data-test` value instead of the shared,
+`[NOT UNIQUE]` text. With the `data-test` values removed entirely (three identical text-only
+`<div>`s, nothing unique at all), the model still answered rather than refusing, but honestly set
+`confidence: "low"` with an explicit ambiguity note — the intended behavior when no candidate has a
+`[VERIFIED UNIQUE]` id/data-test/data-testid to break the tie.
+
+**Confidence now gated on verified uniqueness, not model judgment.** `system-prompt.md` now requires
+`confidence: "high"` only when the matched candidate's id or data-test/data-testid is marked
+`[VERIFIED UNIQUE]` — never merely because the model judges a text/role/aria value "looks" unique,
+and never when the best-matching candidate's id/data-test/data-testid is itself `[NOT UNIQUE]` or
+absent. This closes a gap where the model could previously call itself "high confidence" based on a
+property that was never actually checked for uniqueness in code.
 
 **One naming trap, already fixed.** The candidate list labels an element's `data-test`/`data-testid`
 value as exactly that — never `testId` (`DomElement`'s Java field name, not a real HTML attribute).
