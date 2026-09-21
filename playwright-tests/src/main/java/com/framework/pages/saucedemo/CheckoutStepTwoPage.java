@@ -8,7 +8,7 @@ import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertTha
 public class CheckoutStepTwoPage extends BasePage {
 
     // Locators
-    private final String finishButton = "[data-test='finish']";
+    private final String finishButton = "[data-test=finish']";
     private final String itemTotalLabel = ".summary_subtotal_label";
 
     public CheckoutStepTwoPage(Page page) {
