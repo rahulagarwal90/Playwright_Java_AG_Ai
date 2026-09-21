@@ -11,7 +11,7 @@ public class DemoQaPage extends BasePage {
     private final String emailInput = "#userEmail";
     private final String currentAddressInput = "#currentAddress";
     private final String permanentAddressInput = "#permanentAddress";
-    private final String submitButton = "#submit";
+    private final String submitButton = "button#submit";
     private final String outputName = "#output #name";
     private final String webTablesNavLink = "text=Web Tables";
 
