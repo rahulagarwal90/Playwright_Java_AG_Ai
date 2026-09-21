@@ -471,6 +471,81 @@ public class HealOrchestratorTest {
                 "rendered summary was:\n" + rendered);
     }
 
+    // Real case that surfaced the bug: the fix was correctly built from a [VERIFIED UNIQUE]
+    // data-test value, but the SAME element's shared product text also happens to be listed as
+    // [NOT UNIQUE] in the same matchedElement string - an unrelated field, not the one the
+    // selector was actually based on. The old "does matchedElement contain [NOT UNIQUE]
+    // anywhere" check flagged this as ambiguous even though the used value is verified unique.
+    @Test
+    void ambiguousMatchIsNotFlaggedWhenAnUnrelatedFieldOnTheSameElementIsNotUnique(@TempDir Path tempDir) throws Exception {
+        Path pageFile = tempDir.resolve("InventoryPage.java");
+        Files.writeString(pageFile,
+                "private final String productName = \"#nventory-item-name-BROKEN\";\n", StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure failure = locatorFailure("#nventory-item-name-BROKEN");
+        when(reader.readFailures()).thenReturn(List.of(failure));
+
+        LocatorHealer.HealResult healResult =
+                healResult("#nventory-item-name-BROKEN", "[data-test='inventory-item-name']", pageFile, 1);
+        healResult.confidence = "high";
+        healResult.matchedElement =
+                "data-test=inventory-item-name [VERIFIED UNIQUE] text=\"Sauce Labs Backpack\" [NOT UNIQUE]";
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        when(locatorHealer.heal(failure)).thenReturn(healResult);
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, name -> null, false, DEFAULT_MAX_RETRIES);
+
+        HealOrchestrator.RunSummary summary = orchestrator.runWithSummary();
+
+        assertEquals(List.of(new HealOrchestrator.HealedLocatorEntry(
+                        "InventoryPage.java:1 \"#nventory-item-name-BROKEN\" -> \"[data-test='inventory-item-name']\"",
+                        "high", false)),
+                summary.results().get(0).healedAndKept);
+
+        String rendered = HealOrchestrator.buildSummary(summary);
+        assertTrue(!rendered.contains("ambiguous match"),
+                "rendered summary should not flag an ambiguous match:\n" + rendered);
+    }
+
+    // Original intent preserved: a fix genuinely built from a [NOT UNIQUE] value - here a
+    // text-based selector matched against a text value that IS marked [NOT UNIQUE] - must still
+    // surface "(ambiguous match)", even at high confidence (the existing low-confidence case is
+    // covered by healedAttemptSurfacesLowConfidenceAndAmbiguousMatchInSummaryAndResult above).
+    @Test
+    void ambiguousMatchIsFlaggedWhenSelectorItselfIsBuiltFromANotUniqueValue(@TempDir Path tempDir) throws Exception {
+        Path pageFile = tempDir.resolve("InventoryPage.java");
+        Files.writeString(pageFile,
+                "private final String addToCartButton = \"#add-to-cart-BROKEN\";\n", StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure failure = locatorFailure("#add-to-cart-BROKEN");
+        when(reader.readFailures()).thenReturn(List.of(failure));
+
+        LocatorHealer.HealResult healResult =
+                healResult("#add-to-cart-BROKEN", "text='Add to cart'", pageFile, 1);
+        healResult.confidence = "high";
+        healResult.matchedElement = "text=\"Add to cart\" [NOT UNIQUE]";
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        when(locatorHealer.heal(failure)).thenReturn(healResult);
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, name -> null, false, DEFAULT_MAX_RETRIES);
+
+        HealOrchestrator.RunSummary summary = orchestrator.runWithSummary();
+
+        assertEquals(List.of(new HealOrchestrator.HealedLocatorEntry(
+                        "InventoryPage.java:1 \"#add-to-cart-BROKEN\" -> \"text='Add to cart'\"",
+                        "high", true)),
+                summary.results().get(0).healedAndKept);
+
+        String rendered = HealOrchestrator.buildSummary(summary);
+        assertTrue(rendered.contains("(ambiguous match)"), "rendered summary was:\n" + rendered);
+    }
+
     // testName/className are a real scenario from a real feature file in this repo
     // (playwright-tests/src/test/resources/features/saucedemo/login/login.feature) so the
     // default FeatureFileResolver() the 6-arg HealOrchestrator constructor wires up (which scans

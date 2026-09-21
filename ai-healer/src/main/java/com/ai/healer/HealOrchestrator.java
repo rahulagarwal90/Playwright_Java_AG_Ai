@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Runs the whole Healer chain end to end: reads failures (SurefireReportReader), groups them by
@@ -539,13 +541,87 @@ public class HealOrchestrator {
         return new HealedLocatorEntry(describePatch(healResult), healResult.confidence, isAmbiguousMatch(healResult));
     }
 
-    // LocatorHealer flags a candidate property (text/role/aria) shared by more than one element
-    // in the DOM snapshot with a literal "[NOT UNIQUE]" marker inside matchedElement - see its
-    // buildUserPrompt/formatCandidates. That marker surviving into the model's own matchedElement
-    // answer means the heal it picked may not be unique on the real page either, which is exactly
-    // the kind of heal worth flagging alongside confidence rather than treating as a clean fix.
+    // LocatorHealer flags a candidate property (id/data-test/data-testid/text/role/aria) shared by
+    // more than one element in the DOM snapshot with a literal "[NOT UNIQUE]" marker inside
+    // matchedElement - see its buildUserPrompt/formatCandidates. matchedElement can describe more
+    // than one property of the matched candidate at once (the model is told to "note the ambiguity
+    // explicitly... whenever it relies on or deliberately avoids a NOT UNIQUE property"), so a bare
+    // "does the string contain [NOT UNIQUE] anywhere" check flags a heal as ambiguous even when the
+    // marker belongs to a property the fix was never built from - e.g. a fix correctly built from a
+    // [VERIFIED UNIQUE] data-test value, where matchedElement also happens to mention the SAME
+    // element's shared product text as [NOT UNIQUE] for context. What actually matters is whether
+    // the specific value newSelector was built from carries that marker, not whether the word
+    // appears anywhere in the sentence.
     private static boolean isAmbiguousMatch(LocatorHealer.HealResult healResult) {
-        return healResult.matchedElement != null && healResult.matchedElement.contains("[NOT UNIQUE]");
+        String matchedElement = healResult.matchedElement;
+        if (matchedElement == null) {
+            return false;
+        }
+        String usedValue = extractUsedValue(healResult.newSelector);
+        if (usedValue != null) {
+            Matcher marker = uniquenessMarkerFor(usedValue).matcher(matchedElement);
+            if (marker.find()) {
+                // The marker immediately following the exact value newSelector was built from is
+                // authoritative - trust it over any other [NOT UNIQUE]/[VERIFIED UNIQUE] mention
+                // elsewhere in the string, in either direction.
+                return marker.group(1).equals("NOT UNIQUE");
+            }
+        }
+        // Couldn't identify newSelector's own value inside matchedElement (an unrecognized
+        // selector shape, e.g. a compound/class selector, or matchedElement phrased it in terms
+        // that don't literally echo the value) - fall back to the old blunt check rather than
+        // silently treating it as unambiguous.
+        return matchedElement.contains("[NOT UNIQUE]");
+    }
+
+    // Attribute-selector shapes LocatorHealer's prompt asks Ollama to build newSelector from:
+    // [data-test='x'], [data-testid='x'], [aria-label='x'], [role='x'] (quotes optional/either
+    // kind).
+    private static final Pattern ATTRIBUTE_SELECTOR =
+            Pattern.compile("^\\[(?:data-test|data-testid|aria-label|role)=(['\"]?)([^'\"\\]]*)\\1\\]$");
+    // A bare id selector, e.g. "#login-button" - deliberately anchored to the whole string so a
+    // compound/descendant selector (out of scope here) doesn't get misread as an id-only one.
+    private static final Pattern ID_SELECTOR = Pattern.compile("^#([A-Za-z0-9_-]+)$");
+    // Playwright's text engine: text=Some Text or text='Some Text' or text="Some Text".
+    private static final Pattern TEXT_SELECTOR = Pattern.compile("^text=(['\"]?)(.*)\\1$");
+    // Playwright's role engine, e.g. role=button[name="Login"] - only the role value itself
+    // (before any [name=...] qualifier) maps to a candidate's role property.
+    private static final Pattern ROLE_SELECTOR = Pattern.compile("^role=([A-Za-z0-9_-]+)");
+
+    // Extracts the literal candidate value newSelector was constructed from, so it can be looked
+    // up in matchedElement's own text - e.g. "[data-test='checkout']" -> "checkout",
+    // "#login-button" -> "login-button", "text='Add to cart'" -> "Add to cart". Returns null for
+    // any selector shape not covered by LocatorHealer's documented forms (e.g. ".some-class" or a
+    // compound selector) - the caller falls back to the old whole-string check in that case.
+    private static String extractUsedValue(String newSelector) {
+        if (newSelector == null) {
+            return null;
+        }
+        Matcher attribute = ATTRIBUTE_SELECTOR.matcher(newSelector);
+        if (attribute.matches()) {
+            return attribute.group(2);
+        }
+        Matcher id = ID_SELECTOR.matcher(newSelector);
+        if (id.matches()) {
+            return id.group(1);
+        }
+        Matcher text = TEXT_SELECTOR.matcher(newSelector);
+        if (text.matches()) {
+            return text.group(2);
+        }
+        Matcher role = ROLE_SELECTOR.matcher(newSelector);
+        if (role.find()) {
+            return role.group(1);
+        }
+        return null;
+    }
+
+    // Matches the given value immediately followed (allowing an optional closing quote, mirroring
+    // LocatorHealer.formatCandidates' own "value"/value[ ] shape) by its uniqueness marker, e.g.
+    // "inventory-item-name [VERIFIED UNIQUE]" or "\"Add to cart\" [NOT UNIQUE]". Group 1 is the
+    // marker word ("NOT UNIQUE" or "VERIFIED UNIQUE").
+    private static Pattern uniquenessMarkerFor(String value) {
+        return Pattern.compile(Pattern.quote(value) + "['\"]?\\s*\\[(NOT UNIQUE|VERIFIED UNIQUE)\\]");
     }
 
     // Extra detail appended to a HEALED attempt's summary line only when there's something worth
