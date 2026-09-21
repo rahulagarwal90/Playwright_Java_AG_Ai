@@ -659,15 +659,9 @@ public class HealOrchestrator {
     // hung subprocess, e.g. a browser that never launches - not a tight budget).
     private static TestFailure runScenarioViaMaven(String scenarioName) throws IOException, InterruptedException {
         Path repoRoot = RepoRoot.resolve(HealOrchestrator.class);
-        String nameRegex = "^\\Q" + scenarioName + "\\E$";
         long waitTimeoutMs = Math.max(60_000L, HealerConfig.playwrightTimeoutMs() * 8L);
 
-        int exitCode = MavenRunner.run(repoRoot, List.of(
-                "-pl", "playwright-tests", "test",
-                "-Dcucumber.filter.name=" + nameRegex,
-                "-Dsurefire.failIfNoSpecifiedTests=false",
-                "-Dhealer.skipArtifactCleanup=true"),
-                waitTimeoutMs);
+        int exitCode = MavenRunner.run(repoRoot, buildRerunMavenArgs(scenarioName), waitTimeoutMs);
 
         if (exitCode == 0) {
             return null;
@@ -686,6 +680,26 @@ public class HealOrchestrator {
         unknown.failureType = "unknown";
         unknown.failureMessage = "Re-run exited non-zero, but no matching failure was found in the fresh Surefire report.";
         return unknown;
+    }
+
+    // Builds the `mvn -pl playwright-tests test` args for runScenarioViaMaven's re-run subprocess
+    // - broken out from that method so a test can assert on the exact argument list without
+    // spawning a real `mvn`/browser subprocess. Explicitly passes -Dbrowser.headless=<resolved
+    // value> (HealerConfig.browserHeadless(), mirroring FrameworkConfig's own
+    // system-property/env-var/config-file precedence) rather than leaving it unset: this re-run
+    // is a separate `mvn` invocation/JVM from the one that ran the original failing test, so an
+    // explicit -Dbrowser.headless passed to THAT original `mvn ... test` command never reaches
+    // this process on its own - without this, the re-run always fell back to playwright-tests'
+    // own config.properties default (browser.headless=false) regardless of what the original run
+    // actually used, launching a visible browser during an otherwise-headless pipeline run.
+    static List<String> buildRerunMavenArgs(String scenarioName) {
+        String nameRegex = "^\\Q" + scenarioName + "\\E$";
+        return List.of(
+                "-pl", "playwright-tests", "test",
+                "-Dcucumber.filter.name=" + nameRegex,
+                "-Dsurefire.failIfNoSpecifiedTests=false",
+                "-Dhealer.skipArtifactCleanup=true",
+                "-Dbrowser.headless=" + HealerConfig.browserHeadless());
     }
 
     // Mirrors ai-reviewer's GitHubContext.isPresent() exactly, duplicated rather than depended on:

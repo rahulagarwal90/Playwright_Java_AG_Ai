@@ -546,6 +546,33 @@ public class HealOrchestratorTest {
         assertTrue(rendered.contains("(ambiguous match)"), "rendered summary was:\n" + rendered);
     }
 
+    // Confirms the verification re-run's `mvn` command line always passes an explicit
+    // -Dbrowser.headless flag (rather than relying on playwright-tests' own config.properties
+    // default) - and that it matches HealerConfig.browserHeadless()'s resolved value, whichever
+    // way that value was resolved. System property is cleared/restored around each assertion so
+    // this test can't leak state into others.
+    @Test
+    void rerunMavenArgsAlwaysPassExplicitHeadlessFlagMatchingResolvedValue() {
+        String previous = System.getProperty("browser.headless");
+        try {
+            System.setProperty("browser.headless", "true");
+            List<String> argsWhenTrue = HealOrchestrator.buildRerunMavenArgs("Some Scenario");
+            assertTrue(argsWhenTrue.contains("-Dbrowser.headless=true"),
+                    "expected an explicit -Dbrowser.headless=true, got: " + argsWhenTrue);
+
+            System.setProperty("browser.headless", "false");
+            List<String> argsWhenFalse = HealOrchestrator.buildRerunMavenArgs("Some Scenario");
+            assertTrue(argsWhenFalse.contains("-Dbrowser.headless=false"),
+                    "expected an explicit -Dbrowser.headless=false, got: " + argsWhenFalse);
+        } finally {
+            if (previous == null) {
+                System.clearProperty("browser.headless");
+            } else {
+                System.setProperty("browser.headless", previous);
+            }
+        }
+    }
+
     // testName/className are a real scenario from a real feature file in this repo
     // (playwright-tests/src/test/resources/features/saucedemo/login/login.feature) so the
     // default FeatureFileResolver() the 6-arg HealOrchestrator constructor wires up (which scans

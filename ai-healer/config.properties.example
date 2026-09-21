@@ -1,5 +1,7 @@
-# Ollama model. qwen3:14b also tested. Avoid 32b+ on 24GB RAM machines — insufficient margin.
-ollama.model=qwen2.5-coder:14b
+# Ollama model. Currently qwen3-coder:30b for both local and Jenkins pipeline use - Jenkinsfile.
+# playwright-regression's "Heal Broken Locators" stage sets OLLAMA_MODEL to the same value so both
+# stay on the same model deliberately.
+ollama.model=qwen3-coder:30b
 
 # Maximum number of heal-attempt cycles (LocatorHealer calls) HealOrchestrator will spend on any
 # ONE scenario's retry chain before giving up on that scenario and moving to the next - a budget

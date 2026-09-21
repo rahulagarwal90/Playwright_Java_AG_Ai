@@ -79,6 +79,10 @@ pipeline {
                 CHANGE_ID = 'regression'
                 GITHUB_TOKEN = 'placeholder-not-used-by-healer'
                 AI_HEALER_GITHUB_TOKEN = credentials('github-Ai-Healer-token')
+                // Jenkins never sees the gitignored local ai-healer/config.properties, so set
+                // OLLAMA_MODEL explicitly here to keep Jenkins and local runs on the same model
+                // deliberately (see ai-healer/config.properties.example).
+                OLLAMA_MODEL = 'qwen3-coder:30b'
             }
             steps {
                 script {

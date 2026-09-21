@@ -25,7 +25,9 @@ final class HealerConfig {
 
     private static final int DEFAULT_MAX_RETRIES_PER_SCENARIO = 2;
     private static final int DEFAULT_PLAYWRIGHT_TIMEOUT_MS = 30000;
+    private static final boolean DEFAULT_BROWSER_HEADLESS = false;
     private static final String MAX_RETRIES_PER_SCENARIO_ENV_VAR = "AI_HEALER_MAX_RETRIES_PER_SCENARIO";
+    private static final String BROWSER_HEADLESS_KEY = "browser.headless";
     private static final Path HEALER_CONFIG_RELATIVE_PATH = Path.of("ai-healer", "config.properties");
     private static final Path PLAYWRIGHT_CONFIG_RELATIVE_PATH =
             Path.of("playwright-tests", "src", "test", "resources", "config.properties");
@@ -58,6 +60,30 @@ final class HealerConfig {
     static int playwrightTimeoutMs() {
         String value = readProperty(PLAYWRIGHT_CONFIG_RELATIVE_PATH, "playwright.timeout");
         return parseIntOrDefault(value, DEFAULT_PLAYWRIGHT_TIMEOUT_MS);
+    }
+
+    // The browser.headless value the ORIGINAL test run resolved, so HealOrchestrator's
+    // verification re-run subprocess (a separate `mvn` invocation/JVM in its own right) can be
+    // told the same value explicitly instead of silently falling back to playwright-tests' own
+    // config-file default regardless of what the original run actually used. Mirrors
+    // playwright-tests' FrameworkConfig.browserHeadless() resolution order exactly - system
+    // property, then env var, then playwright-tests/src/test/resources/config.properties, then
+    // false - since that's the same precedence Owner's system:properties/system:env/file sources
+    // apply for FrameworkConfig, just read directly here (no dependency on playwright-tests).
+    static boolean browserHeadless() {
+        String fromSystemProperty = System.getProperty(BROWSER_HEADLESS_KEY);
+        if (fromSystemProperty != null && !fromSystemProperty.isBlank()) {
+            return Boolean.parseBoolean(fromSystemProperty.trim());
+        }
+        String fromEnv = System.getenv(BROWSER_HEADLESS_KEY);
+        if (fromEnv != null && !fromEnv.isBlank()) {
+            return Boolean.parseBoolean(fromEnv.trim());
+        }
+        String fromConfigFile = readProperty(PLAYWRIGHT_CONFIG_RELATIVE_PATH, BROWSER_HEADLESS_KEY);
+        if (fromConfigFile != null) {
+            return Boolean.parseBoolean(fromConfigFile);
+        }
+        return DEFAULT_BROWSER_HEADLESS;
     }
 
     private static int parseIntOrDefault(String value, int defaultValue) {
