@@ -16,6 +16,10 @@ pipeline {
         GITHUB_PR_NUMBER  = "${env.CHANGE_ID}"
         // Name of the regression pipeline job to trigger after PR AI review runs.
         REGRESSION_JOB_NAME = 'playwright-regression-suite'
+        // Jenkins never sees the gitignored local ai-reviewer/config.properties, so set
+        // OLLAMA_MODEL explicitly here to keep Jenkins and local runs on the same model
+        // deliberately (see ai-reviewer/config.properties.example).
+        OLLAMA_MODEL = 'qwen3-coder:30b'
     }
 
     stages {
