@@ -86,9 +86,9 @@ pipeline {
             steps {
                 script {
                     if (isUnix()) {
-                        sh 'mvn -pl ai-healer compile exec:java -Dexec.mainClass="com.ai.healer.HealOrchestrator"'
+                        sh 'mvn -pl ai-healer compile exec:java -Dexec.mainClass="com.ai.healer.HealOrchestrator" -Dbrowser.headless=true'
                     } else {
-                        bat 'mvn -pl ai-healer compile exec:java -Dexec.mainClass="com.ai.healer.HealOrchestrator"'
+                        bat 'mvn -pl ai-healer compile exec:java -Dexec.mainClass="com.ai.healer.HealOrchestrator" -Dbrowser.headless=true'
                     }
                 }
             }
