@@ -57,7 +57,15 @@ pipeline {
     post {
         always {
             script {
-                if (env.CHANGE_ID?.trim()) {
+                // CHANGE_BRANCH is the source branch name for the PR, injected by the same
+                // Jenkins Multibranch/GitHub Branch Source mechanism as CHANGE_ID above (both
+                // are only set in PR build context). AiHealer's own PRs always come from a
+                // heal/* branch (see HealerGitClient) - skip re-triggering regression for those
+                // so a heal branch's own PR review doesn't loop back into regression again,
+                // recreating the same loop the githubPush() trigger removal above just closed.
+                if (env.CHANGE_ID?.trim() && env.CHANGE_BRANCH?.startsWith('heal/')) {
+                    echo "[INFO] PR #${env.CHANGE_ID} is from AiHealer branch '${env.CHANGE_BRANCH}'; skipping regression pipeline trigger to avoid a heal-PR review/regression loop."
+                } else if (env.CHANGE_ID?.trim()) {
                     echo "[INFO] Triggering regression pipeline '${env.REGRESSION_JOB_NAME}' for PR #${env.CHANGE_ID}."
                     try {
                         build job: env.REGRESSION_JOB_NAME,

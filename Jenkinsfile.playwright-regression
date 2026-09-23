@@ -14,7 +14,6 @@ pipeline {
 
     triggers {
         cron('H 02 * * *') // Scheduled nightly run at 2 AM
-        githubPush()       // Automatically trigger regression run on branch pushes (like PR merges)
     }
 
     environment {
