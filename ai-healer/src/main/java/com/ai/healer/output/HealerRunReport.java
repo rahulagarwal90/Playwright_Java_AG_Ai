@@ -73,6 +73,11 @@ public final class HealerRunReport {
             // A group WITH a PR already got its NOT_FIXABLE entries posted as PR comments
             // (NotFixablePrCommenter) - reporting them again here would be a duplicate.
             entry.notFixable = pr == null ? notFixableEntries(groupOutcome.results()) : List.of();
+            // Unlike NOT_FIXABLE, a HEAL_ERROR is never posted anywhere else (NotFixablePrCommenter
+            // only handles NOT_FIXABLE) - so this is the only place it's ever surfaced, regardless
+            // of whether the group got a PR. See healErrorEntries()'s own javadoc for why this is a
+            // separate list rather than folded into notFixable.
+            entry.healErrors = healErrorEntries(groupOutcome.results());
             document.featureGroups.add(entry);
         }
 
@@ -85,7 +90,38 @@ public final class HealerRunReport {
             document.unresolvedFeatures.add(entry);
         }
 
+        // Top-level, unmissable signal of what kind of run this was - see determineRunStatus()'s
+        // javadoc. Deliberately computed off summary.results() (every original failure across every
+        // group, flat) rather than re-derived from document.featureGroups, since unresolved-feature
+        // failures never reach a GroupOutcome/heal attempt at all and must not be counted as errors.
+        document.totalFailuresProcessed = summary.results().size();
+        document.healErrorCount = (int) summary.results().stream()
+                .filter(result -> result.outcome == Outcome.HEAL_ERROR)
+                .count();
+        document.runStatus = determineRunStatus(summary, document.healErrorCount);
+
         return document;
+    }
+
+    // The one field meant to be read first and alone: whether this run needed no healing at all,
+    // healed things with no errors, or ran into HEAL_ERROR (an unexpected exception during a heal
+    // attempt - e.g. Ollama unreachable - as opposed to a normal, expected outcome like NOT_FIXABLE
+    // or HEAL_FAILED). Without this, a run where every single attempt errored out (Ollama down for
+    // the whole run) produces a report whose feature groups all show empty healedAndKept/notFixable
+    // - identical, at a glance, to a run where the suite simply passed with nothing to heal. This
+    // field exists specifically so that confusion is impossible without reading every entry.
+    private static String determineRunStatus(RunSummary summary, int healErrorCount) {
+        int total = summary.results().size();
+        if (total == 0) {
+            return summary.unresolvedFeatures().isEmpty() ? "NOTHING_TO_HEAL" : "NO_FAILURES_HEALED_UNRESOLVED_FEATURES_ONLY";
+        }
+        if (healErrorCount == total) {
+            return "ALL_ATTEMPTS_ERRORED";
+        }
+        if (healErrorCount > 0) {
+            return "PARTIAL_ERRORS";
+        }
+        return "COMPLETED";
     }
 
     private static List<HealedEntry> healedAndKept(List<Result> results) {
@@ -122,10 +158,46 @@ public final class HealerRunReport {
         return entries;
     }
 
+    // A HEAL_ERROR is NOT a NOT_FIXABLE classification - NOT_FIXABLE means FailureClassifier looked
+    // at the failure and determined it isn't locator-shaped at all (a normal, expected outcome).
+    // HEAL_ERROR means something THREW while attempting to heal a failure FailureClassifier had
+    // already said WAS locator-shaped (Ollama unreachable, no DOM snapshot, the re-run subprocess
+    // itself failing to launch, ...) - an unexpected failure of the healing machinery, not a
+    // judgment about the test failure itself. Conflating the two into notFixableEntries() would
+    // make "Ollama was down" look identical to "this is a real app defect, not a broken locator" -
+    // exactly the ambiguity this method exists to eliminate. See determineRunStatus() for the
+    // corresponding top-level signal.
+    private static List<HealErrorEntry> healErrorEntries(List<Result> results) {
+        List<HealErrorEntry> entries = new ArrayList<>();
+        for (Result result : results) {
+            if (result.outcome != Outcome.HEAL_ERROR) {
+                continue;
+            }
+            HealErrorEntry entry = new HealErrorEntry();
+            entry.testName = result.originalFailure.testName;
+            // The original test failure's own message (e.g. the locator timeout text) - which
+            // locator/scenario healing was attempting when it errored, distinct from the error
+            // below (why the healing attempt itself failed).
+            entry.failureMessage = result.originalFailure.failureMessage;
+            // The heal attempt's own exception message (e.g. "Connection refused" for Ollama being
+            // unreachable) - set by HealOrchestrator's catch block, unchanged by this task.
+            entry.error = result.note;
+            entries.add(entry);
+        }
+        return entries;
+    }
+
     // Plain, flat POJOs for Gson - field names double as the JSON keys. No behavior of their own.
     private static final class ReportDocument {
         String generatedAt;
         int maxRetriesPerScenario;
+        // The single field meant to answer "what kind of run was this" at a glance - see
+        // determineRunStatus(). healErrorCount/totalFailuresProcessed back it up with the raw
+        // counts runStatus was computed from, so a reader doesn't have to recount featureGroups
+        // entries (which also exclude unresolved-feature failures entirely) to verify it.
+        String runStatus;
+        int totalFailuresProcessed;
+        int healErrorCount;
         List<FeatureGroupEntry> featureGroups = new ArrayList<>();
         List<UnresolvedFeatureEntry> unresolvedFeatures = new ArrayList<>();
     }
@@ -136,6 +208,7 @@ public final class HealerRunReport {
         String pullRequestUrl;
         List<HealedEntry> healedAndKept;
         List<NotFixableEntry> notFixable;
+        List<HealErrorEntry> healErrors;
     }
 
     // Same "old" -> "new" description LocatorHealer/HealOrchestrator's summary already reports,
@@ -154,6 +227,12 @@ public final class HealerRunReport {
         String failureType;
         String failureMessage;
         String note;
+    }
+
+    private static final class HealErrorEntry {
+        String testName;
+        String failureMessage;
+        String error;
     }
 
     private static final class UnresolvedFeatureEntry {
