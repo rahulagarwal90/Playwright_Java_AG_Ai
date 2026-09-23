@@ -1,3 +1,34 @@
+// Checks whether this PR carries HealerPullRequestCreator's "ai-healer-generated" label (see
+// ai-healer's com.ai.healer.github.HealerPullRequestCreator, which applies it via the GitHub REST
+// API's "Add labels to an issue" endpoint on every PR it creates) - a live API check made at
+// review time, so it can never go stale the way the CHANGE_BRANCH-prefix check alone could: a heal
+// branch forks from whatever Jenkinsfile.ai-reviewer version was on main at that moment, so a fix
+// landing on main afterward would never reach an already-forked branch's own PR review (this
+// happened for real on PR #75). The label lives on the PR itself, not the branch, so it's visible
+// regardless of which Jenkinsfile version any given branch happens to carry.
+// Fails safe: any error talking to the API (network hiccup, unexpected response shape) is logged
+// and treated as "no label", falling back to the CHANGE_BRANCH-prefix check below rather than
+// failing the whole post-action.
+def hasHealLabel() {
+    if (!env.CHANGE_ID?.trim()) {
+        return false
+    }
+    try {
+        def response = sh(
+            script: '''
+                curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+                     -H "Accept: application/vnd.github.v3+json" \
+                     "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$GITHUB_PR_NUMBER/labels"
+            ''',
+            returnStdout: true
+        ).trim()
+        return response.contains('"name":"ai-healer-generated"') || response.contains('"name": "ai-healer-generated"')
+    } catch (Exception ex) {
+        echo "[WARN] Could not fetch PR #${env.CHANGE_ID} labels to check for 'ai-healer-generated': ${ex.message}"
+        return false
+    }
+}
+
 pipeline {
     agent any
 
@@ -61,14 +92,16 @@ pipeline {
     post {
         always {
             script {
-                // CHANGE_BRANCH is the source branch name for the PR, injected by the same
-                // Jenkins Multibranch/GitHub Branch Source mechanism as CHANGE_ID above (both
-                // are only set in PR build context). AiHealer's own PRs always come from a
-                // heal/* branch (see HealerGitClient) - skip re-triggering regression for those
-                // so a heal branch's own PR review doesn't loop back into regression again,
-                // recreating the same loop the githubPush() trigger removal above just closed.
-                if (env.CHANGE_ID?.trim() && env.CHANGE_BRANCH?.startsWith('heal/')) {
-                    echo "[INFO] PR #${env.CHANGE_ID} is from AiHealer branch '${env.CHANGE_BRANCH}'; skipping regression pipeline trigger to avoid a heal-PR review/regression loop."
+                // Two independent signals decide this is a heal PR - either is sufficient to skip:
+                // 1) hasHealLabel() - the "ai-healer-generated" label, checked live via the GitHub
+                //    API (see hasHealLabel() above for why this is the primary, non-stale signal);
+                // 2) CHANGE_BRANCH (the PR's source branch, injected by the same Jenkins
+                //    Multibranch/GitHub Branch Source mechanism as CHANGE_ID, only set in PR build
+                //    context) starting with heal/ - kept as a secondary/backup condition in case
+                //    the label call somehow fails silently, so a heal PR stays protected either way.
+                def isHealPr = env.CHANGE_ID?.trim() && (hasHealLabel() || env.CHANGE_BRANCH?.startsWith('heal/'))
+                if (isHealPr) {
+                    echo "[INFO] PR #${env.CHANGE_ID} (branch '${env.CHANGE_BRANCH}') is an AiHealer PR; skipping regression pipeline trigger to avoid a heal-PR review/regression loop."
                 } else if (env.CHANGE_ID?.trim()) {
                     echo "[INFO] Triggering regression pipeline '${env.REGRESSION_JOB_NAME}' for PR #${env.CHANGE_ID}."
                     try {

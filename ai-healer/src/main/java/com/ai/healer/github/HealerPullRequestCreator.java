@@ -2,6 +2,7 @@ package com.ai.healer.github;
 
 import com.ai.healer.RepoRoot;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.io.IOException;
 import java.net.URI;
@@ -14,14 +15,27 @@ import java.nio.file.Path;
 /**
  * Opens a GitHub PR via the REST API from the branch {@link HealerGitClient} just pushed,
  * targeting {@code main} - mirrors ai-reviewer's {@code GitHubCommentPoster}'s HTTP call style
- * (same header/auth shape, same "throw on a non-2xx response" convention). Creation only - never
- * merges, approves, or closes a PR.
+ * (same header/auth shape, same "throw on a non-2xx response" convention). Also labels every PR it
+ * creates with {@value #HEAL_LABEL_NAME} via the "Add labels to an issue" endpoint (labels work
+ * identically for issues and PRs), creating the label on the repo first if it doesn't already
+ * exist (GitHub's add-labels endpoint 422s on a label name that was never created). This label is
+ * what {@code Jenkinsfile.ai-reviewer}'s post-action checks - via a live API call at review time,
+ * not something baked into the branch at creation time - to decide whether to skip triggering the
+ * regression suite for a heal PR, so the decision can never go stale on a branch that forked
+ * before a fix to that Jenkinsfile landed on main. Creation only - never merges, approves, or
+ * closes a PR.
  */
 public class HealerPullRequestCreator {
 
     private static final Path PLAYWRIGHT_TEST_RESOURCES_RELATIVE_PATH =
             Path.of("playwright-tests", "src", "test", "resources");
     private static final String BASE_BRANCH = "main";
+
+    static final String HEAL_LABEL_NAME = "ai-healer-generated";
+    private static final String HEAL_LABEL_COLOR = "5319e7";
+    private static final String HEAL_LABEL_DESCRIPTION =
+            "Opened automatically by ai-healer. Jenkinsfile.ai-reviewer skips triggering the "
+                    + "regression suite for PRs carrying this label.";
 
     private final HttpClient httpClient;
 
@@ -42,6 +56,17 @@ public class HealerPullRequestCreator {
         String apiBase = HealerGitHubConfig.apiBase();
         String token = HealerGitHubConfig.token();
 
+        PullRequest pullRequest = openPullRequest(repo, apiBase, token, branchName, featureFilePath, bodySummary);
+        ensureHealLabelExists(repo, apiBase, token);
+        addHealLabel(repo, apiBase, token, pullRequest.number());
+        return pullRequest;
+    }
+
+    // Package-private (rather than folded into createPullRequest) so a test can call it directly
+    // with an explicit repo/apiBase/token instead of going through HealerGitHubConfig's real
+    // System.getenv() reads - same testability rationale as HealerGitHubConfig.resolveToken(String).
+    PullRequest openPullRequest(String repo, String apiBase, String token, String branchName,
+            Path featureFilePath, String bodySummary) throws IOException, InterruptedException {
         String title = "AI Healer: fixes for " + relativeFeaturePath(featureFilePath);
 
         JsonObject payload = new JsonObject();
@@ -65,6 +90,66 @@ public class HealerPullRequestCreator {
 
         JsonObject json = new Gson().fromJson(response.body(), JsonObject.class);
         return new PullRequest(json.get("number").getAsInt(), json.get("html_url").getAsString());
+    }
+
+    // Idempotent: a GET on /labels/{name} 200s if the label already exists on the repo (the
+    // common case after the first heal PR ever created it) and only then does the label get
+    // created. Package-private for the same testability reason as openPullRequest above.
+    void ensureHealLabelExists(String repo, String apiBase, String token) throws IOException, InterruptedException {
+        HttpRequest getRequest = HttpRequest.newBuilder()
+                .uri(URI.create(String.format("%s/repos/%s/labels/%s", apiBase, repo, HEAL_LABEL_NAME)))
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("Authorization", "Bearer " + token)
+                .GET()
+                .build();
+        HttpResponse<String> getResponse =
+                httpClient.send(getRequest, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        if (getResponse.statusCode() == 200) {
+            return;
+        }
+        if (getResponse.statusCode() != 404) {
+            throw new IOException("GitHub label lookup failed: " + getResponse.statusCode() + " " + getResponse.body());
+        }
+
+        JsonObject payload = new JsonObject();
+        payload.addProperty("name", HEAL_LABEL_NAME);
+        payload.addProperty("color", HEAL_LABEL_COLOR);
+        payload.addProperty("description", HEAL_LABEL_DESCRIPTION);
+
+        HttpRequest createRequest = HttpRequest.newBuilder()
+                .uri(URI.create(String.format("%s/repos/%s/labels", apiBase, repo)))
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("Authorization", "Bearer " + token)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(new Gson().toJson(payload), StandardCharsets.UTF_8))
+                .build();
+        HttpResponse<String> createResponse =
+                httpClient.send(createRequest, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        if (createResponse.statusCode() < 200 || createResponse.statusCode() > 299) {
+            throw new IOException("GitHub label creation failed: " + createResponse.statusCode() + " " + createResponse.body());
+        }
+    }
+
+    // Package-private for the same testability reason as openPullRequest/ensureHealLabelExists.
+    void addHealLabel(String repo, String apiBase, String token, int pullRequestNumber)
+            throws IOException, InterruptedException {
+        JsonArray labels = new JsonArray();
+        labels.add(HEAL_LABEL_NAME);
+        JsonObject payload = new JsonObject();
+        payload.add("labels", labels);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(String.format("%s/repos/%s/issues/%d/labels", apiBase, repo, pullRequestNumber)))
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("Authorization", "Bearer " + token)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(new Gson().toJson(payload), StandardCharsets.UTF_8))
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        if (response.statusCode() < 200 || response.statusCode() > 299) {
+            throw new IOException("GitHub label assignment failed: " + response.statusCode() + " " + response.body());
+        }
     }
 
     private static String relativeFeaturePath(Path featureFilePath) {
