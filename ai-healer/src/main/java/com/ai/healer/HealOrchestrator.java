@@ -8,6 +8,7 @@ import com.ai.healer.github.NotFixablePrCommenter;
 import com.ai.healer.ollama.HealerOllamaClient;
 import com.ai.healer.ollama.LocatorHealer;
 import com.ai.healer.output.HealerRunReport;
+import com.ai.healer.output.HealerRunReportHtml;
 import com.ai.healer.patch.PageObjectPatcher;
 import com.ai.healer.report.FeatureFileResolver;
 import com.ai.healer.report.ScenarioGroup;
@@ -505,6 +506,13 @@ public class HealOrchestrator {
             LOGGER.info("Healer run report written to " + written);
         } catch (IOException e) {
             LOGGER.severe("Failed to write healer run report: " + e.getMessage());
+        }
+        // Separate try so an HTML write failure can never affect the JSON report above.
+        try {
+            Path writtenHtml = HealerRunReportHtml.write(summary, prOutcomes);
+            LOGGER.info("Healer HTML run report written to " + writtenHtml);
+        } catch (IOException e) {
+            LOGGER.severe("Failed to write healer HTML run report: " + e.getMessage());
         }
     }
 
