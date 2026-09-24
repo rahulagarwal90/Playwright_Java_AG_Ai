@@ -411,6 +411,20 @@ public class HealOrchestrator {
 
             if (!patchResult.applied) {
                 // Refused, and still failing - genuinely nothing this attempt could do.
+                // Unless the re-run now fails at a DIFFERENT locator: an earlier scenario in this
+                // same run already fixed currentFailure's locator, so chase the new one instead.
+                String freshLocator = LocatorHealer.tryExtractBrokenLocator(freshFailure);
+                String currentLocator = LocatorHealer.tryExtractBrokenLocator(currentFailure);
+                if (freshLocator != null && currentLocator != null && !freshLocator.equals(currentLocator)) {
+                    LOGGER.warning("[PATCH_REFUSED] \"" + originalFailure.testName + "\" - " + patchResult.reason
+                            + "; but the scenario now fails at a different locator (\"" + currentLocator
+                            + "\" -> \"" + freshLocator + "\") - continuing.");
+                    attempts.add(new HealAttempt(attemptNumber, false, "PATCH_REFUSED",
+                            "\"" + currentFailure.testName + "\": " + patchResult.reason
+                                    + "; scenario progressed to new locator \"" + freshLocator + "\""));
+                    currentFailure = freshFailure;
+                    continue;
+                }
                 LOGGER.warning("[PATCH_REFUSED] \"" + originalFailure.testName + "\" - " + patchResult.reason);
                 attempts.add(new HealAttempt(attemptNumber, false, "PATCH_REFUSED",
                         "\"" + currentFailure.testName + "\": " + patchResult.reason));

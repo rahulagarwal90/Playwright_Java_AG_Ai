@@ -257,6 +257,81 @@ public class HealOrchestratorTest {
     }
 
     @Test
+    void chasesADifferentLocatorWhenPatchIsRefusedButRerunHasProgressed(@TempDir Path tempDir) throws Exception {
+        // An earlier scenario in the same run already fixed this one's first locator, so the
+        // patch is refused (line 1 isn't a patchable field declaration) - but the re-run now
+        // fails at loginButton instead, which should be chased and healed.
+        Path pageFile = tempDir.resolve("LoginPage.java");
+        Files.writeString(pageFile,
+                "// passwordInput already fixed by an earlier scenario\n"
+                + "private final String loginButton = \"#login-button-BROKEN\";\n",
+                StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure originalFailure = locatorFailure("password");
+        when(reader.readFailures()).thenReturn(List.of(originalFailure));
+
+        TestFailure loginButtonFailure = locatorFailure("#login-button-BROKEN");
+
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        when(locatorHealer.heal(originalFailure))
+                .thenReturn(healResult("password", "#password", pageFile, 1));
+        when(locatorHealer.heal(loginButtonFailure))
+                .thenReturn(healResult("#login-button-BROKEN", "#login-button", pageFile, 2));
+
+        HealOrchestrator.ScenarioRerunner rerunner = mock(HealOrchestrator.ScenarioRerunner.class);
+        when(rerunner.rerun(anyString())).thenReturn(loginButtonFailure, (TestFailure) null);
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, rerunner, false, DEFAULT_MAX_RETRIES);
+
+        HealOrchestrator.RunSummary summary = orchestrator.runWithSummary();
+
+        assertEquals(HealOrchestrator.Outcome.HEALED, summary.results().get(0).outcome);
+        assertEquals(List.of(new HealOrchestrator.HealedLocatorEntry(
+                        "LoginPage.java:2 \"#login-button-BROKEN\" -> \"#login-button\"", "high", false)),
+                summary.results().get(0).healedAndKept);
+        assertEquals(2, summary.attempts().size());
+        assertEquals("PATCH_REFUSED", summary.attempts().get(0).label());
+        assertTrue(!summary.attempts().get(0).succeeded());
+        assertEquals("HEALED", summary.attempts().get(1).label());
+        assertTrue(summary.attempts().get(1).succeeded());
+        assertEquals(
+                "// passwordInput already fixed by an earlier scenario\n"
+                + "private final String loginButton = \"#login-button\";\n",
+                Files.readString(pageFile, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void stillReportsPatchRefusedWhenRerunFailsAtTheSameLocator(@TempDir Path tempDir) throws Exception {
+        Path pageFile = tempDir.resolve("LoginPage.java");
+        String original = "// not a patchable field declaration\n";
+        Files.writeString(pageFile, original, StandardCharsets.UTF_8);
+
+        SurefireReportReader reader = mock(SurefireReportReader.class);
+        TestFailure failure = locatorFailure("password");
+        when(reader.readFailures()).thenReturn(List.of(failure));
+
+        LocatorHealer locatorHealer = mock(LocatorHealer.class);
+        when(locatorHealer.heal(failure)).thenReturn(healResult("password", "#password", pageFile, 1));
+
+        HealOrchestrator.ScenarioRerunner rerunner = name -> locatorFailure("password");
+
+        PageObjectPatcher realPatcher = new PageObjectPatcher();
+        HealOrchestrator orchestrator = new HealOrchestrator(
+                reader, locatorHealer, realPatcher, rerunner, false, DEFAULT_MAX_RETRIES);
+
+        HealOrchestrator.RunSummary summary = orchestrator.runWithSummary();
+
+        assertEquals(HealOrchestrator.Outcome.PATCH_REFUSED, summary.results().get(0).outcome);
+        assertTrue(summary.results().get(0).healedAndKept.isEmpty());
+        assertEquals(1, summary.attempts().size());
+        assertEquals("PATCH_REFUSED", summary.attempts().get(0).label());
+        assertEquals(original, Files.readString(pageFile, StandardCharsets.UTF_8));
+    }
+
+    @Test
     void stopsAndReportsWhenRetryBudgetIsExhaustedBeforeFullResolution(@TempDir Path tempDir) throws Exception {
         // Same double-break shape as above, but maxRetries=1: only the first locator gets a heal
         // attempt at all. The correct passwordInput fix must still be kept (not reverted), and the
