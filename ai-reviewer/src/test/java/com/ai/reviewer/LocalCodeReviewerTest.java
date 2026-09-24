@@ -3,11 +3,15 @@ package com.ai.reviewer;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Flow;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -100,5 +104,88 @@ public class LocalCodeReviewerTest {
 
         // Assert: an exception should be thrown because Ollama returned non-200.
         assertThrows(Exception.class, resultFuture::get);
+    }
+
+    @Test
+    void runReviewRemembersExactlyTheDiffItSentToOllama() throws Exception {
+        // AlreadyAppliedFindingFilter in main() must check findings against the same diff Ollama saw.
+        HttpClient mockClient = mock(HttpClient.class);
+        HttpResponse<String> mockResponse = mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(200);
+        when(mockResponse.body()).thenReturn("{\"message\":{\"content\":\"{\\\"findings\\\":[]}\"}}\n");
+        when(mockClient.sendAsync(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn((CompletableFuture) CompletableFuture.completedFuture(mockResponse));
+
+        LocalCodeReviewer reviewer = spy(new LocalCodeReviewer(mockClient));
+        // The second block has no +/- lines, so filterDiff() drops it before anything reaches Ollama.
+        String rawDiff = "diff --git a/Page.java b/Page.java\n"
+                + "--- a/Page.java\n"
+                + "+++ b/Page.java\n"
+                + "@@ -1,1 +1,1 @@\n"
+                + "-    private final String a = \"#old\";\n"
+                + "+    private final String a = \"[data-test='new']\";\n"
+                + "diff --git a/Mode.java b/Mode.java\n"
+                + "old mode 100644\n"
+                + "new mode 100755\n";
+        doReturn(rawDiff).when(reviewer).getGitDiff();
+
+        reviewer.runReview().get();
+
+        Field field = LocalCodeReviewer.class.getDeclaredField("lastReviewedDiff");
+        field.setAccessible(true);
+        String remembered = (String) field.get(reviewer);
+        assertEquals(com.ai.reviewer.diff.DiffFetcher.filterDiff(rawDiff), remembered);
+        assertFalse(remembered.contains("Mode.java"));
+
+        ArgumentCaptor<HttpRequest> requestCaptor = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(mockClient).sendAsync(requestCaptor.capture(), any(HttpResponse.BodyHandler.class));
+        // Gson HTML-escapes ' as \u0027 on the wire, so decode the JSON and read the user message itself.
+        String body = readBody(requestCaptor.getValue());
+        String sentDiff = com.google.gson.JsonParser.parseString(body).getAsJsonObject()
+                .getAsJsonArray("messages").get(1).getAsJsonObject().get("content").getAsString();
+        assertTrue(sentDiff.contains("private final String a = \"[data-test='new']\";"));
+        assertTrue(sentDiff.contains("private final String a = \"#old\";"));
+        assertFalse(sentDiff.contains("Mode.java"));
+    }
+
+    @Test
+    void runReviewWithNoChangesLeavesRememberedDiffEmpty() throws Exception {
+        LocalCodeReviewer reviewer = spy(new LocalCodeReviewer(mock(HttpClient.class)));
+        doReturn("").when(reviewer).getGitDiff();
+
+        reviewer.runReview().get();
+
+        Field field = LocalCodeReviewer.class.getDeclaredField("lastReviewedDiff");
+        field.setAccessible(true);
+        assertEquals("", field.get(reviewer));
+    }
+
+    // Drains an HttpRequest's BodyPublisher into a String so the JSON actually sent can be inspected.
+    private static String readBody(HttpRequest request) throws Exception {
+        StringBuilder body = new StringBuilder();
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        request.bodyPublisher().orElseThrow().subscribe(new Flow.Subscriber<ByteBuffer>() {
+            @Override
+            public void onSubscribe(Flow.Subscription subscription) {
+                subscription.request(Long.MAX_VALUE);
+            }
+
+            @Override
+            public void onNext(ByteBuffer item) {
+                body.append(StandardCharsets.UTF_8.decode(item));
+            }
+
+            @Override
+            public void onError(Throwable throwable) {
+                done.completeExceptionally(throwable);
+            }
+
+            @Override
+            public void onComplete() {
+                done.complete(null);
+            }
+        });
+        done.get();
+        return body.toString();
     }
 }

@@ -1,0 +1,13 @@
+diff --git a/playwright-tests/src/main/java/com/framework/pages/saucedemo/InventoryPage.java b/playwright-tests/src/main/java/com/framework/pages/saucedemo/InventoryPage.java
+index 865f664..79a11cf 100644
+--- a/playwright-tests/src/main/java/com/framework/pages/saucedemo/InventoryPage.java
++++ b/playwright-tests/src/main/java/com/framework/pages/saucedemo/InventoryPage.java
+@@ -10,7 +10,7 @@ public class InventoryPage extends BasePage {
+     // Locators
+     private final String inventoryContainer = "#inventory_container";
+     private final String cartIcon = ".shopping_cart_link";
+-    private final String addBackpackToCartButton = "[data-testadd-to-cart-sauce-labs-backpack']";
++    private final String addBackpackToCartButton = "[data-test='add-to-cart-sauce-labs-backpack']";
+     private final String addBikeLightToCartButton = "[data-test='add-to-cart-sauce-labs-bike-light']";
+     private final String removeBackpackButton = "#remove-sauce-labs-backpack";
+     private final String removeBikeLightButton = "[data-test='remove-sauce-labs-bike-light']";

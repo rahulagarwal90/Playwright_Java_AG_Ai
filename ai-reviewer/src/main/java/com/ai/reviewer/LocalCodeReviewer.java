@@ -32,6 +32,10 @@ public class LocalCodeReviewer {
     private final DiffFetcher diffFetcher;
     private final OllamaReviewClient ollamaReviewClient;
 
+    // The exact filtered diff runReview() last sent to Ollama, so main() can check findings
+    // against that same diff (AlreadyAppliedFindingFilter) rather than re-fetching a new one.
+    private volatile String lastReviewedDiff = "";
+
     // Wires up real network-backed dependencies for normal command-line use.
     public LocalCodeReviewer() {
         this(HttpClient.newHttpClient());
@@ -57,7 +61,7 @@ public class LocalCodeReviewer {
                 // runReview() already logged why. Skip straight to a clean exit.
                 if (!NO_CHANGES_RESULT.equals(reviewJson)) {
                     List<ReviewFinding> findings = FindingParser.parse(reviewJson);
-                    List<ReviewFinding> failedFindings = findings.stream()
+                    List<ReviewFinding> failedFindings = AlreadyAppliedFindingFilter.filter(findings, reviewer.lastReviewedDiff).stream()
                             .filter(finding -> "FAILED".equalsIgnoreCase(finding.status))
                             .toList();
                     if (!failedFindings.isEmpty()) {
@@ -94,6 +98,7 @@ public class LocalCodeReviewer {
                 return CompletableFuture.completedFuture(NO_CHANGES_RESULT);
             }
             LOGGER.info(">>> Sending changes to local Ollama (model: " + OllamaConfig.model() + ")...");
+            lastReviewedDiff = filteredDiff;
             return ollamaReviewClient.sendReview(filteredDiff)
                     .thenApply(reviewJson -> {
                         logFindingsToTerminal(reviewJson);

@@ -74,6 +74,7 @@ three-question sections below.
 | `com.ai.healer.github` | `HealerPullRequestCreator` | Opens a GitHub PR from the branch `HealerGitClient` just pushed, targeting `main` — creation only, never merges or approves. |
 | `com.ai.healer.github` | `NotFixablePrCommenter` | Posts one PR comment per `NOT_FIXABLE` failure encountered while processing a group that got a PR. |
 | `com.ai.healer.output` | `HealerRunReport` | Writes a single flat JSON file summarizing one run — what was healed per feature file, `NOT_FIXABLE` entries not otherwise posted to a PR, and any unresolved-feature diagnostics. |
+| `com.ai.healer.output` | `HealerRunReportHtml` | Writes the same run data as a static HTML page, with its styling in a separate `healer-run-report.css` next to it (linked, not inline, because Jenkins' artifact CSP blocks inline styles — so both files must be archived). |
 
 ---
 

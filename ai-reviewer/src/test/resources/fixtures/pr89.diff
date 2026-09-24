@@ -1,0 +1,13 @@
+diff --git a/playwright-tests/src/main/java/com/framework/pages/saucedemo/LoginPage.java b/playwright-tests/src/main/java/com/framework/pages/saucedemo/LoginPage.java
+index 7c7399a..b978a7b 100644
+--- a/playwright-tests/src/main/java/com/framework/pages/saucedemo/LoginPage.java
++++ b/playwright-tests/src/main/java/com/framework/pages/saucedemo/LoginPage.java
+@@ -8,7 +8,7 @@
+ public class LoginPage extends BasePage {
+ 
+     // Locators
+-    private final String usernameInput = "#username";
++    private final String usernameInput = "[data-test='username']";
+     private final String passwordInput = "#password";
+     private final String loginButton = "#login-button";
+ 

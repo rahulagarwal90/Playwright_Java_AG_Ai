@@ -21,12 +21,17 @@ import java.util.Map;
  * Writes a single, static, human-readable HTML view of one HealOrchestrator run, alongside (not
  * instead of) {@link HealerRunReport}'s JSON. Same data, same per-group rules as the JSON report -
  * NOT_FIXABLE entries only for a group with no PR, HEAL_ERROR entries always, the same runStatus
- * values - just rendered as plain HTML/CSS with no JS and no external resources, so the file opens
- * as a Jenkins artifact with nothing else alongside it.
+ * values - just rendered as plain HTML with no JS. Its styling lives in a separate
+ * healer-run-report.css written next to the HTML (Jenkins' artifact CSP blocks inline styles), so
+ * that file must be archived alongside it.
  */
 public final class HealerRunReportHtml {
 
     private static final Path DEFAULT_RELATIVE_PATH = Path.of("ai-healer", "target", "healer-run-report.html");
+
+    // Jenkins' default artifact CSP (style-src 'self') blocks inline <style>, so STYLE is written to
+    // this separate same-origin stylesheet next to the HTML and linked instead.
+    static final String CSS_FILE_NAME = "healer-run-report.css";
 
     private static final String STYLE = """
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -65,6 +70,7 @@ public final class HealerRunReportHtml {
             Files.createDirectories(outputPath.getParent());
         }
         Files.writeString(outputPath, render(summary, prOutcomesByFeaturePath), StandardCharsets.UTF_8);
+        Files.writeString(outputPath.resolveSibling(CSS_FILE_NAME), STYLE, StandardCharsets.UTF_8);
         return outputPath;
     }
 
@@ -77,7 +83,8 @@ public final class HealerRunReportHtml {
         StringBuilder html = new StringBuilder();
         html.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
                 .append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
-                .append("<title>Healer Run Report</title>\n<style>\n").append(STYLE).append("</style>\n")
+                .append("<title>Healer Run Report</title>\n")
+                .append("<link rel=\"stylesheet\" href=\"").append(CSS_FILE_NAME).append("\">\n")
                 .append("</head>\n<body>\n<h1>Healer Run Report</h1>\n<dl class=\"summary\">\n");
         summaryRow(html, "Generated at", Instant.now().toString());
         summaryRow(html, "Run status", determineRunStatus(summary, healErrorCount));
