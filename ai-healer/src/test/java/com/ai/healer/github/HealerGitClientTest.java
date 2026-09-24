@@ -54,6 +54,55 @@ public class HealerGitClientTest {
                 "the second branch's parent must NOT be the first branch's commit");
     }
 
+    // Stale-branch-checkout regression coverage: when an "origin" remote exists, createAndCommitBranch
+    // must fetch it and branch from origin/main's real tip, not from the local repo's own "main"
+    // ref - which git fetch never updates on its own and which can go stale across many builds in
+    // a reused workspace. Simulates that staleness directly: origin's main is advanced by a
+    // second, independent clone AFTER the local repo already has its own (now-stale) "main", and
+    // the local repo never fetches on its own before createAndCommitBranch is called.
+    @Test
+    void createAndCommitBranchFetchesOriginBeforeBranchingWhenLocalMainIsStale(@TempDir Path root) throws Exception {
+        Path remoteRepo = root.resolve("remote.git");
+        run(root, "git", "init", "-q", "--bare", remoteRepo.toString());
+
+        Path localRepo = root.resolve("local");
+        Files.createDirectory(localRepo);
+        initRepoWithOneCommitOnMain(localRepo);
+        run(localRepo, "git", "remote", "add", "origin", remoteRepo.toString());
+        run(localRepo, "git", "push", "-q", "origin", "main");
+
+        String staleLocalMainSha = revParse(localRepo, "main");
+
+        // Advance origin's main independently, without the local repo ever fetching it - mirrors
+        // another build (or another workspace) pushing fixes to origin/main in the meantime.
+        Path advancerRepo = root.resolve("advancer");
+        run(root, "git", "clone", "-q", remoteRepo.toString(), advancerRepo.toString());
+        run(advancerRepo, "git", "config", "user.email", "test@example.com");
+        run(advancerRepo, "git", "config", "user.name", "Test");
+        run(advancerRepo, "git", "checkout", "main");
+        Files.writeString(advancerRepo.resolve("NEWFILE.md"), "advance\n", StandardCharsets.UTF_8);
+        run(advancerRepo, "git", "add", "NEWFILE.md");
+        run(advancerRepo, "git", "commit", "-q", "-m", "advance main on origin");
+        run(advancerRepo, "git", "push", "-q", "origin", "main");
+        String advancedOriginMainSha = revParse(advancerRepo, "main");
+
+        assertNotEquals(staleLocalMainSha, advancedOriginMainSha,
+                "fixture setup should genuinely advance origin's main past the local repo's stale ref");
+
+        HealerGitClient gitClient = new HealerGitClient(localRepo);
+        Path cartPageFile = localRepo.resolve("CartPage.java");
+        Files.writeString(cartPageFile, "private final String checkoutButton = \"#checkout\";\n", StandardCharsets.UTF_8);
+        ScenarioGroup cartGroup = new ScenarioGroup(localRepo.resolve("cart.feature"), List.<TestFailure>of());
+
+        String branchName = gitClient.createAndCommitBranch(cartGroup, List.of(cartPageFile), "heal cart.feature");
+        String branchParentSha = revParse(localRepo, branchName + "^");
+
+        assertEquals(advancedOriginMainSha, branchParentSha,
+                "the new branch must be cut from origin/main's real tip, not the stale local main ref");
+        assertNotEquals(staleLocalMainSha, branchParentSha,
+                "the new branch must NOT be cut from the stale local main ref");
+    }
+
     // BUG 1 coverage: the push must use an explicit https://x-access-token:<token>@github.com/...
     // URL (reusing HealerGitHubConfig's existing token resolution, not a new config key) instead
     // of plain "origin" - asserted directly against the pure URL-building method rather than

@@ -59,9 +59,23 @@ public class HealerGitClient {
     // branch), cut the new branch from it, stage the given files, and commit. Package-private so
     // it can be exercised directly against a real scratch git repo without a network-dependent
     // push - see HealerGitClientTest.
+    //
+    // A plain "checkout main" resolves the LOCAL "main" ref, which git fetch never updates on its
+    // own and which can go stale across many builds in a reused Jenkins workspace - confirmed for
+    // real via GitHub: several recent heal PRs' branches all shared the same days-old parent
+    // commit despite being created back-to-back, because every one of them forked from a frozen
+    // local "main" snapshot regardless of how much had since landed on origin/main. When an
+    // "origin" remote exists, fetch it and reset the branching point to origin/main's real tip
+    // instead. Standalone/local/unit-test scratch repos (this class's own tests) have no "origin"
+    // remote, so they fall back to the original plain "checkout main" behavior unchanged.
     String createAndCommitBranch(ScenarioGroup group, List<Path> changedFiles, String commitMessage)
             throws IOException, InterruptedException {
-        runGit("checkout", "main");
+        if (hasOriginRemote()) {
+            runGit("fetch", "origin", "main");
+            runGit("checkout", "-B", "main", "origin/main");
+        } else {
+            runGit("checkout", "main");
+        }
 
         String branchName = buildBranchName(group.flatBranchName());
         runGit("checkout", "-b", branchName);
@@ -130,6 +144,26 @@ public class HealerGitClient {
         return (runNumber != null && !runNumber.isBlank())
                 ? "heal/" + flatBranchName + "-run" + runNumber + "-" + timestamp
                 : "heal/" + flatBranchName + "-" + timestamp;
+    }
+
+    // Package-private so it can be asserted indirectly via createAndCommitBranch's behavior in
+    // tests. Uses "git remote" (not e.g. relying on a caught exception from a failed fetch) so a
+    // repo with no "origin" at all takes the plain-checkout fallback path deliberately, not as a
+    // side effect of a failed command.
+    boolean hasOriginRemote() throws IOException, InterruptedException {
+        Process process = new ProcessBuilder("git", "remote")
+                .directory(repoRoot.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output;
+        try (InputStream in = process.getInputStream()) {
+            output = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            return false;
+        }
+        return output.lines().anyMatch(line -> line.trim().equals("origin"));
     }
 
     private void runGit(String... args) throws IOException, InterruptedException {

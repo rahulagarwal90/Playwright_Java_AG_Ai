@@ -29,6 +29,36 @@ def hasHealLabel() {
     }
 }
 
+// Third independent signal: queries the PR itself via GET /repos/.../pulls/$GITHUB_PR_NUMBER
+// (not the labels endpoint - this only needs read access, sidestepping any Issues:write
+// permission question the label endpoint has) and checks its head branch ref and title. Neither
+// the label (permission-dependent - see hasHealLabel()) nor CHANGE_BRANCH alone (proven fragile -
+// forks from whatever Jenkinsfile version was on main at fork time, see hasHealLabel()'s comment)
+// is fully reliable on its own, so this is a third, independently-sourced check rather than a
+// replacement for either. Fails safe: any error talking to the API is logged and treated as "not
+// a heal PR" here, falling through to the other two signals rather than failing the post-action.
+def isHealPrByPullsApi() {
+    if (!env.CHANGE_ID?.trim()) {
+        return false
+    }
+    try {
+        def response = sh(
+            script: '''
+                curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+                     -H "Accept: application/vnd.github.v3+json" \
+                     "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$GITHUB_PR_NUMBER"
+            ''',
+            returnStdout: true
+        ).trim()
+        def headRefIsHeal = response =~ /"ref"\s*:\s*"heal\//
+        def titleIsAiHealer = response =~ /"title"\s*:\s*"AI Healer:/
+        return headRefIsHeal.find() || titleIsAiHealer.find()
+    } catch (Exception ex) {
+        echo "[WARN] Could not fetch PR #${env.CHANGE_ID} details to check head ref/title: ${ex.message}"
+        return false
+    }
+}
+
 pipeline {
     agent any
 
@@ -92,14 +122,20 @@ pipeline {
     post {
         always {
             script {
-                // Two independent signals decide this is a heal PR - either is sufficient to skip:
+                // Three independent signals decide this is a heal PR - any one is sufficient to skip:
                 // 1) hasHealLabel() - the "ai-healer-generated" label, checked live via the GitHub
-                //    API (see hasHealLabel() above for why this is the primary, non-stale signal);
+                //    API (see hasHealLabel() above for why this is a non-stale signal, but
+                //    permission-dependent - it needs Issues:write on the token);
                 // 2) CHANGE_BRANCH (the PR's source branch, injected by the same Jenkins
                 //    Multibranch/GitHub Branch Source mechanism as CHANGE_ID, only set in PR build
-                //    context) starting with heal/ - kept as a secondary/backup condition in case
-                //    the label call somehow fails silently, so a heal PR stays protected either way.
-                def isHealPr = env.CHANGE_ID?.trim() && (hasHealLabel() || env.CHANGE_BRANCH?.startsWith('heal/'))
+                //    context) starting with heal/ - proven fragile on its own (see hasHealLabel()'s
+                //    comment re: PR #75), kept as one signal among several rather than removed;
+                // 3) isHealPrByPullsApi() - a live, read-only GitHub API check of the PR's own head
+                //    ref/title, sidestepping the label endpoint's permission question entirely.
+                // Any single true signal is enough, so a permission gap or staleness in one never
+                // defeats the others.
+                def isHealPr = env.CHANGE_ID?.trim() &&
+                        (hasHealLabel() || env.CHANGE_BRANCH?.startsWith('heal/') || isHealPrByPullsApi())
                 if (isHealPr) {
                     echo "[INFO] PR #${env.CHANGE_ID} (branch '${env.CHANGE_BRANCH}') is an AiHealer PR; skipping regression pipeline trigger to avoid a heal-PR review/regression loop."
                 } else if (env.CHANGE_ID?.trim()) {
