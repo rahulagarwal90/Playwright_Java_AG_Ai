@@ -108,6 +108,7 @@ pipeline {
 
                 // Archive the AI Healer's run report, tolerant of it not existing on a clean-pass run
                 archiveArtifacts artifacts: 'ai-healer/target/healer-run-report.json', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'ai-healer/target/healer-run-report.html', allowEmptyArchive: true
 
                 // Publish Allure Report (Using the installed Allure Jenkins Plugin) wrapped in try-catch
                 try {
@@ -124,6 +125,7 @@ pipeline {
                 echo "=================================================="
                 echo "JUnit Test Report URL: ${env.BUILD_URL}testReport/"
                 echo "AI Healer Report: ${env.BUILD_URL}artifact/ai-healer/target/healer-run-report.json"
+                echo "AI Healer HTML Report: ${env.BUILD_URL}artifact/ai-healer/target/healer-run-report.html"
                 echo "=================================================="
             }
         }
