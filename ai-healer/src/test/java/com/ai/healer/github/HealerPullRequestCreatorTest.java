@@ -1,6 +1,7 @@
 package com.ai.healer.github;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -104,6 +105,36 @@ public class HealerPullRequestCreatorTest {
 
         // No label-creation POST to /labels this time - only open PR, lookup, and add-to-issue.
         verify(mockClient, times(3)).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    }
+
+    // The real bug this test guards against: a PR was genuinely created on GitHub (openPullRequest
+    // succeeded, 201 + a real PR number/URL), but the run report showed prCreated: false because a
+    // labeling failure afterward propagated as an exception and made the whole createPullRequest()
+    // call look like it failed. createPullRequest() must still return the PR - with
+    // labelApplied: false - rather than throwing.
+    @Test
+    void createPullRequestStillReturnsThePrWhenLabelingFailsAfterwards() throws Exception {
+        HttpClient mockClient = mock(HttpClient.class);
+        HealerPullRequestCreator creator = new HealerPullRequestCreator(mockClient);
+
+        HttpResponse<String> pullRequestResponse = mock(HttpResponse.class);
+        when(pullRequestResponse.statusCode()).thenReturn(201);
+        when(pullRequestResponse.body()).thenReturn(
+                "{\"number\": 101, \"html_url\": \"https://github.com/acme/widgets/pull/101\"}");
+
+        HttpResponse<String> labelLookupFailure = mock(HttpResponse.class);
+        when(labelLookupFailure.statusCode()).thenReturn(500);
+        when(labelLookupFailure.body()).thenReturn("{\"message\": \"Internal Server Error\"}");
+
+        when(mockClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(pullRequestResponse, labelLookupFailure);
+
+        HealerPullRequestCreator.PullRequest pullRequest = creator.createPullRequest(
+                REPO, API_BASE, TOKEN, "heal/cart-feature-20260101-000000", Path.of("cart.feature"), "summary text");
+
+        assertEquals(101, pullRequest.number());
+        assertEquals("https://github.com/acme/widgets/pull/101", pullRequest.htmlUrl());
+        assertFalse(pullRequest.labelApplied(), "labeling failed and should be reported as such");
     }
 
     @Test

@@ -11,6 +11,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.logging.Logger;
 
 /**
  * Opens a GitHub PR via the REST API from the branch {@link HealerGitClient} just pushed,
@@ -24,8 +25,17 @@ import java.nio.file.Path;
  * regression suite for a heal PR, so the decision can never go stale on a branch that forked
  * before a fix to that Jenkinsfile landed on main. Creation only - never merges, approves, or
  * closes a PR.
+ *
+ * <p>PR creation and labeling are deliberately NOT all-or-nothing: the PR itself
+ * ({@link #openPullRequest}) is the thing that matters, and a labeling failure afterward (rate
+ * limit, permissions, a transient GitHub error) must never make a real, successfully-created PR
+ * look like it doesn't exist. {@link #createPullRequest} therefore only lets an
+ * {@link #openPullRequest} failure propagate as an exception; a labeling failure is caught, logged
+ * as a WARNing, and reported back via {@link PullRequest#labelApplied()} instead.</p>
  */
 public class HealerPullRequestCreator {
+
+    private static final Logger LOGGER = Logger.getLogger(HealerPullRequestCreator.class.getName());
 
     private static final Path PLAYWRIGHT_TEST_RESOURCES_RELATIVE_PATH =
             Path.of("playwright-tests", "src", "test", "resources");
@@ -43,23 +53,51 @@ public class HealerPullRequestCreator {
         this.httpClient = httpClient;
     }
 
-    public record PullRequest(int number, String htmlUrl) {
+    // labelApplied is false on the value openPullRequest() itself returns (labeling hasn't been
+    // attempted yet at that point) - createPullRequest() below returns a corrected copy once it
+    // knows whether labeling actually succeeded.
+    public record PullRequest(int number, String htmlUrl, boolean labelApplied) {
     }
 
     // Title includes the feature file's path relative to playwright-tests' resources root (e.g.
     // "features/saucedemo/cart/cart.feature"), so a reviewer can tell at a glance which scenario
     // this PR is healing. Body is exactly the same human-readable summary text
     // HealOrchestrator.buildSummary() already produces for this group - no separate PR-body format.
+    //
+    // Only openPullRequest's own failure can make this method throw - see the class javadoc for
+    // why a labeling failure is handled separately instead.
     public PullRequest createPullRequest(String branchName, Path featureFilePath, String bodySummary)
             throws IOException, InterruptedException {
-        String repo = HealerGitHubConfig.repository();
-        String apiBase = HealerGitHubConfig.apiBase();
-        String token = HealerGitHubConfig.token();
+        return createPullRequest(HealerGitHubConfig.repository(), HealerGitHubConfig.apiBase(),
+                HealerGitHubConfig.token(), branchName, featureFilePath, bodySummary);
+    }
 
-        PullRequest pullRequest = openPullRequest(repo, apiBase, token, branchName, featureFilePath, bodySummary);
-        ensureHealLabelExists(repo, apiBase, token);
-        addHealLabel(repo, apiBase, token, pullRequest.number());
-        return pullRequest;
+    // Package-private overload with an explicit repo/apiBase/token, same testability rationale as
+    // openPullRequest/ensureHealLabelExists/addHealLabel - lets a test exercise the "PR created but
+    // labeling failed" behavior without depending on real GitHub env vars.
+    PullRequest createPullRequest(String repo, String apiBase, String token, String branchName,
+            Path featureFilePath, String bodySummary) throws IOException, InterruptedException {
+        PullRequest opened = openPullRequest(repo, apiBase, token, branchName, featureFilePath, bodySummary);
+
+        boolean labelApplied;
+        try {
+            ensureHealLabelExists(repo, apiBase, token);
+            addHealLabel(repo, apiBase, token, opened.number());
+            labelApplied = true;
+        } catch (IOException e) {
+            labelApplied = false;
+            LOGGER.warning("[HEAL_LABEL_FAILED] PR #" + opened.number() + " (" + opened.htmlUrl() + ") was "
+                    + "created successfully but applying the \"" + HEAL_LABEL_NAME + "\" label failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            labelApplied = false;
+            LOGGER.warning("[HEAL_LABEL_FAILED] PR #" + opened.number() + " (" + opened.htmlUrl() + ") was "
+                    + "created successfully but applying the \"" + HEAL_LABEL_NAME + "\" label was interrupted: "
+                    + e.getMessage());
+        }
+
+        return new PullRequest(opened.number(), opened.htmlUrl(), labelApplied);
     }
 
     // Package-private (rather than folded into createPullRequest) so a test can call it directly
@@ -89,7 +127,7 @@ public class HealerPullRequestCreator {
         }
 
         JsonObject json = new Gson().fromJson(response.body(), JsonObject.class);
-        return new PullRequest(json.get("number").getAsInt(), json.get("html_url").getAsString());
+        return new PullRequest(json.get("number").getAsInt(), json.get("html_url").getAsString(), false);
     }
 
     // Idempotent: a GET on /labels/{name} 200s if the label already exists on the repo (the

@@ -143,8 +143,10 @@ public class HealOrchestrator {
     // Pipeline-context-only: the branch/PR HealerGitClient and HealerPullRequestCreator created
     // for one ScenarioGroup's healed changes. Absent (not present in the map runWithSummary()
     // builds) for any group that healed nothing, or that isn't being processed in pipeline
-    // context at all (a local checkout never creates one).
-    public record PrOutcome(String branchName, int pullRequestNumber, String pullRequestUrl) {
+    // context at all (a local checkout never creates one). labelApplied is false when the PR
+    // itself was created successfully but HealerPullRequestCreator's labeling step afterward
+    // failed - see its own javadoc; a PrOutcome being present at all already means the PR exists.
+    public record PrOutcome(String branchName, int pullRequestNumber, String pullRequestUrl, boolean labelApplied) {
     }
 
     // Bundles what run() already returns (List<Result>) together with the flat attempt log the
@@ -472,7 +474,8 @@ public class HealOrchestrator {
                 }
 
                 prOutcomes.put(group.featureFilePath(),
-                        new PrOutcome(branch.branchName(), pullRequest.number(), pullRequest.htmlUrl()));
+                        new PrOutcome(branch.branchName(), pullRequest.number(), pullRequest.htmlUrl(),
+                                pullRequest.labelApplied()));
                 LOGGER.info("[PR_CREATED] " + group.featureFilePath() + " -> " + pullRequest.htmlUrl());
             } catch (Exception e) {
                 LOGGER.severe("[GIT_PR_ERROR] " + group.featureFilePath() + " - "
@@ -720,41 +723,33 @@ public class HealOrchestrator {
 
     // Builds the end-of-run, human-readable summary block - separate from the detailed per-
     // attempt LOGGER lines main() prints above it, which stay exactly as they were. Printed via
-    // System.out (not the logger) specifically so it renders as a clean box, with no per-line
-    // timestamp/class-name prefix. Package-private (not private) so tests can assert on the exact
-    // rendered text. Also reused, unmodified, as the exact text of a pipeline-context git commit
-    // message and PR body for a single ScenarioGroup (see wireGitAndPullRequests above) - callers
+    // System.out (not the logger) specifically so it renders cleanly, with no per-line
+    // timestamp/class-name prefix. Kept deliberately compact (no decorative separator bars, one
+    // line per attempt) since this same text is also used as a PR description - see below.
+    // Package-private (not private) so tests can assert on the exact rendered text. Also reused,
+    // unmodified, as the exact text of a pipeline-context git commit message and PR body for a
+    // single ScenarioGroup (see wireGitAndPullRequests above) - callers
     // there simply pass a RunSummary scoped to just that group's own results/attempts instead of
     // the whole run's.
     static String buildSummary(RunSummary summary) {
-        String bar = "=".repeat(42);
         StringBuilder sb = new StringBuilder();
-        sb.append(bar).append('\n');
-        sb.append("HEALER RUN SUMMARY").append('\n');
-        sb.append(bar).append('\n');
-        sb.append("Model: ").append(HealerOllamaClient.model()).append('\n');
+        sb.append("AI Healer Summary (model: ").append(HealerOllamaClient.model()).append(")\n");
 
         List<HealAttempt> attempts = summary.attempts();
         if (attempts.isEmpty()) {
             sb.append(noAttemptsExplanation(summary.results())).append('\n');
-            sb.append(bar).append('\n');
             return sb.toString();
         }
 
         int succeeded = 0;
         for (HealAttempt attempt : attempts) {
-            sb.append("Attempt ").append(attempt.attemptNumber()).append('/').append(summary.maxRetries()).append(":\n");
-            String tag = "[" + attempt.label() + "]";
-            sb.append("  ").append(tag);
-            for (int i = tag.length(); i < 15; i++) {
-                sb.append(' ');
-            }
-            sb.append(' ').append(attempt.description()).append('\n');
+            sb.append(attempt.attemptNumber()).append('/').append(summary.maxRetries())
+                    .append(" [").append(attempt.label()).append("] ")
+                    .append(attempt.description()).append('\n');
             if (attempt.succeeded()) {
                 succeeded++;
             }
         }
-        sb.append("-".repeat(42)).append('\n');
 
         int total = attempts.size();
         // The retry budget is the reason a MAX_RETRIES_EXCEEDED result exists at all - see
@@ -769,23 +764,18 @@ public class HealOrchestrator {
                         || r.outcome == Outcome.PATCH_REFUSED || r.outcome == Outcome.HEAL_ERROR)
                 .count();
 
-        sb.append("RESULT: ").append(succeeded).append(" of ").append(total).append(" attempt")
-                .append(total == 1 ? "" : "s").append(" succeeded");
+        sb.append("Result: ").append(succeeded).append('/').append(total).append(" attempts succeeded");
         if (budgetReached) {
-            sb.append(", retry budget (maxRetriesPerScenario=").append(summary.maxRetries()).append(") reached.\n");
-            sb.append("If failures remain, re-run this command again to continue healing further.\n");
-        } else {
-            sb.append(".\n");
+            sb.append(", retry budget reached - re-run to continue");
         }
+        sb.append('.');
         if (needsHuman > 0) {
-            sb.append(needsHuman).append(" failure(s) need human attention (not fixable by re-running) - "
-                    + "see detailed logs above.\n");
+            sb.append(' ').append(needsHuman).append(" failure(s) need human attention.");
         }
+        sb.append('\n');
 
         List<String> filesChanged = changedFileNames(summary.results());
-        sb.append("Files changed (uncommitted, please review): ")
-                .append(filesChanged.isEmpty() ? "none" : String.join(", ", filesChanged)).append('\n');
-        sb.append(bar).append('\n');
+        sb.append("Files changed: ").append(filesChanged.isEmpty() ? "none" : String.join(", ", filesChanged)).append('\n');
         return sb.toString();
     }
 

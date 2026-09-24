@@ -81,7 +81,7 @@ public class HealOrchestratorTest {
 
         HealerPullRequestCreator pullRequestCreator = mock(HealerPullRequestCreator.class);
         HealerPullRequestCreator.PullRequest pullRequest =
-                new HealerPullRequestCreator.PullRequest(42, "https://github.com/example/repo/pull/42");
+                new HealerPullRequestCreator.PullRequest(42, "https://github.com/example/repo/pull/42", true);
         when(pullRequestCreator.createPullRequest(eq(branch.branchName()), any(), any())).thenReturn(pullRequest);
 
         NotFixablePrCommenter commenter = mock(NotFixablePrCommenter.class);
@@ -374,15 +374,14 @@ public class HealOrchestratorTest {
 
         String rendered = HealOrchestrator.buildSummary(orchestrator.runWithSummary());
 
-        assertTrue(rendered.contains("HEALER RUN SUMMARY"));
-        assertTrue(rendered.contains("Attempt 1/2:"));
-        assertTrue(rendered.contains("[HEALED]"));
+        assertTrue(rendered.contains("AI Healer Summary"));
+        assertTrue(rendered.contains("1/2 [HEALED]"));
         assertTrue(rendered.contains("CartPage.checkoutButton: \"[datatest='checkout']\" -> \"[data-test='checkout']\""));
-        assertTrue(rendered.contains("Attempt 2/2:"));
+        assertTrue(rendered.contains("2/2 [HEALED]"));
         assertTrue(rendered.contains("CheckoutStepOnePage.lastNameInput"));
-        assertTrue(rendered.contains("RESULT: 2 of 2 attempts succeeded"),
+        assertTrue(rendered.contains("Result: 2/2 attempts succeeded"),
                 "rendered summary was:\n" + rendered);
-        assertTrue(rendered.contains("Files changed (uncommitted, please review): CartPage.java, CheckoutStepOnePage.java"),
+        assertTrue(rendered.contains("Files changed: CartPage.java, CheckoutStepOnePage.java"),
                 "rendered summary was:\n" + rendered);
     }
 
@@ -414,9 +413,7 @@ public class HealOrchestratorTest {
 
         String rendered = HealOrchestrator.buildSummary(orchestrator.runWithSummary());
 
-        assertTrue(rendered.contains("RESULT: 1 of 1 attempt succeeded, retry budget (maxRetriesPerScenario=1) reached."),
-                "rendered summary was:\n" + rendered);
-        assertTrue(rendered.contains("re-run this command again to continue healing further"),
+        assertTrue(rendered.contains("Result: 1/1 attempts succeeded, retry budget reached - re-run to continue."),
                 "rendered summary was:\n" + rendered);
     }
 

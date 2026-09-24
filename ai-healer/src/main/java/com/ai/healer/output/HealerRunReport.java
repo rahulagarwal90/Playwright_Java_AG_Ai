@@ -69,6 +69,9 @@ public final class HealerRunReport {
             entry.featureFile = group.featureFilePath().toString();
             entry.prCreated = pr != null;
             entry.pullRequestUrl = pr != null ? pr.pullRequestUrl() : null;
+            // null (not false) when there's no PR at all - labeling can't have failed for a PR
+            // that was never created, so that's a different situation from labelApplied: false.
+            entry.labelApplied = pr != null ? pr.labelApplied() : null;
             entry.healedAndKept = healedAndKept(groupOutcome.results());
             // A group WITH a PR already got its NOT_FIXABLE entries posted as PR comments
             // (NotFixablePrCommenter) - reporting them again here would be a duplicate.
@@ -206,6 +209,10 @@ public final class HealerRunReport {
         String featureFile;
         boolean prCreated;
         String pullRequestUrl;
+        // null when prCreated is false (no PR exists, so labeling was never attempted); true/false
+        // once a PR was created, depending on whether HealerPullRequestCreator's labeling step
+        // afterward succeeded - see HealerPullRequestCreator's class javadoc.
+        Boolean labelApplied;
         List<HealedEntry> healedAndKept;
         List<NotFixableEntry> notFixable;
         List<HealErrorEntry> healErrors;

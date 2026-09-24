@@ -62,7 +62,8 @@ public class HealerRunReportTest {
         GroupOutcome groupOutcome = new GroupOutcome(group, List.of(notFixable), List.of());
         RunSummary summary = new RunSummary(List.of(notFixable), List.of(), 2, List.of(groupOutcome), List.of());
 
-        Map<Path, PrOutcome> prOutcomes = Map.of(group.featureFilePath(), new PrOutcome("heal/cart-feature", 7, "https://example/pr/7"));
+        Map<Path, PrOutcome> prOutcomes =
+                Map.of(group.featureFilePath(), new PrOutcome("heal/cart-feature", 7, "https://example/pr/7", true));
 
         Path outputPath = tempDir.resolve("healer-run-report.json");
         HealerRunReport.write(summary, prOutcomes, outputPath);
@@ -71,7 +72,38 @@ public class HealerRunReportTest {
         JsonObject featureGroup = document.getAsJsonArray("featureGroups").get(0).getAsJsonObject();
         assertEquals(true, featureGroup.get("prCreated").getAsBoolean());
         assertEquals("https://example/pr/7", featureGroup.get("pullRequestUrl").getAsString());
+        assertEquals(true, featureGroup.get("labelApplied").getAsBoolean());
         assertEquals(0, featureGroup.getAsJsonArray("notFixable").size());
+    }
+
+    // A PR was successfully created but HealerPullRequestCreator's labeling step afterward failed
+    // (e.g. GitHub rate limit) - prCreated must still report true (a real PR exists), while
+    // labelApplied surfaces the labeling failure separately rather than masking the successful
+    // PR creation. See HealerPullRequestCreator's class javadoc for why these are independent.
+    @Test
+    void reportsPrCreatedTrueAndLabelAppliedFalseWhenLabelingFailedAfterASuccessfulPrCreation(@TempDir Path tempDir)
+            throws Exception {
+        TestFailure failure = new TestFailure();
+        failure.testName = "Some other scenario";
+        failure.className = "Shopping Cart";
+
+        Result healed = newResult(failure, Outcome.HEALED,
+                List.of(new HealedLocatorEntry("CartPage.java:1 \"#broken\" -> \"#checkout\"", "high", false)),
+                List.of(), "");
+        ScenarioGroup group = new ScenarioGroup(tempDir.resolve("cart.feature"), List.of(failure));
+        GroupOutcome groupOutcome = new GroupOutcome(group, List.of(healed), List.of());
+        RunSummary summary = new RunSummary(List.of(healed), List.of(), 2, List.of(groupOutcome), List.of());
+
+        Map<Path, PrOutcome> prOutcomes =
+                Map.of(group.featureFilePath(), new PrOutcome("heal/cart-feature", 7, "https://example/pr/7", false));
+
+        Path outputPath = tempDir.resolve("healer-run-report.json");
+        HealerRunReport.write(summary, prOutcomes, outputPath);
+
+        JsonObject document = JsonParser.parseString(Files.readString(outputPath, StandardCharsets.UTF_8)).getAsJsonObject();
+        JsonObject featureGroup = document.getAsJsonArray("featureGroups").get(0).getAsJsonObject();
+        assertEquals(true, featureGroup.get("prCreated").getAsBoolean());
+        assertEquals(false, featureGroup.get("labelApplied").getAsBoolean());
     }
 
     @Test
