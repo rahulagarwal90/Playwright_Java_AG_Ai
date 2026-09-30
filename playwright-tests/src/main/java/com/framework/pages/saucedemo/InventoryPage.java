@@ -10,7 +10,7 @@ public class InventoryPage extends BasePage {
     // Locators
     private final String inventoryContainer = "#inventory_container";
     private final String cartIcon = ".shopping_cart_link";
-    private final String addBackpackToCartButton = "[data-testadd-to-cart-sauce-labs-backpack']";
+    private final String addBackpackToCartButton = "[data-test='add-to-cart-sauce-labs-backpack']";
     private final String addBikeLightToCartButton = "[data-test='add-to-cart-sauce-labs-bike-light']";
     private final String removeBackpackButton = "#remove-sauce-labs-backpack";
     private final String removeBikeLightButton = "[data-test='remove-sauce-labs-bike-light']";
