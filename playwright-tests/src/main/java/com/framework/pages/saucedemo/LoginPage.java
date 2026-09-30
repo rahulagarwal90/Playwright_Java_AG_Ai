@@ -8,7 +8,7 @@ import io.qameta.allure.Step;
 public class LoginPage extends BasePage {
 
     // Locators
-    private final String usernameInput = "usernam";
+    private final String usernameInput = "#user-name";
     private final String passwordInput = "#password";
     private final String loginButton = "#login-button";
 
